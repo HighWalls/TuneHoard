@@ -1,0 +1,20 @@
+# Secrets and auth caches
+.env
+.spotify_cache
+.cache
+
+# Claude Code session state (contains local paths, username)
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime output
+downloads/
+*.csv
+*.mp3
+failures.txt
+
