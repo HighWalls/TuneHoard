@@ -51,12 +51,20 @@ def _detect_key(y: np.ndarray, sr: int) -> tuple[str, str]:
 
 
 def _detect_bpm(y: np.ndarray, sr: int) -> int:
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    # start_bpm biases the beat-tracker autocorrelation toward the DJ range.
+    # Default is 120; raising to 150 reduces half-time picks on fast tracks
+    # (e.g. 166 BPM DnB/trap that librosa otherwise reports as 83).
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr, start_bpm=150)
     bpm = float(np.atleast_1d(tempo)[0])
-    # Normalise obvious half/double-time errors toward the DJ-useful 70-180 range.
-    while bpm < 70:
+    # Clamp to [85, 200]. Upper bound is 200 so genuine D&B / hardcore tracks
+    # (170-200 BPM) don't get halved. Bounds are non-overlapping:
+    #   - doubling < 85 caps at 170, never triggers the halve branch.
+    #   - halving > 200 floors at 100, never triggers the double branch.
+    # Genuine sub-85 BPM (boom-bap hip-hop) still gets wrongly doubled —
+    # override those via index.csv edit + --bucket-by-bpm sync.
+    while bpm < 85:
         bpm *= 2
-    while bpm > 180:
+    while bpm > 200:
         bpm /= 2
     return int(round(bpm))
 

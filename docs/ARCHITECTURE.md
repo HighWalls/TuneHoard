@@ -78,6 +78,8 @@ out_dir/failures.txt    (if any track matched no source)
 - CSV write is atomic: sort first (in memory), write to `index.csv.tmp`, then `replace()` the real file. A crash mid-write can't wipe a valid index.
 - CSV is sorted by `(camelot, bpm)`. Camelot sort is lexicographic on the string (`"10A" < "1A"` — this is *wrong* musically but stable enough for DJ prep; if it matters, parse to `(int, letter)` before sorting). `_bpm_sort_key()` coerces BPM to int because rows loaded from CSV have it as str while fresh rows have it as int.
 - At startup, `sys.stdout` and `sys.stderr` are reconfigured to UTF-8 (`errors="replace"`). Without this, Windows' default cp1252 codepage crashes on most track titles (kanji, emoji, symbols) and even on the `→` arrow used in progress output.
+- `bpm_bucket(bpm)` returns the subfolder name for a given BPM. Anchor band `115-125` is 11 BPM wide (both bounds inclusive); everything else aligns to that anchor in 10-wide bands. The asymmetry is deliberate — DJs typically treat 115-125 as one "house/deep tempo" pocket.
+- When `--bucket-by-bpm` is set, `process_track` writes new files into `out_dir/<bucket>/...`, and after the main loop `main()` runs a sync pass over *every* row (existing + new) that moves mismatched files into their correct bucket and `rmdir`s any emptied folders. This makes the flag idempotent: toggle it on a flat library and the next run reorganizes everything without re-downloading.
 
 ## Extension points
 

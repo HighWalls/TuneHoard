@@ -15,12 +15,13 @@ from spotipy.oauth2 import SpotifyOAuth
 
 @dataclass
 class Track:
-    spotify_id: str
+    spotify_id: str            # generic "primary key"; YT/SC entries get "yt:..." / "sc:..."
     title: str
     artists: list[str]
     album: str
     duration_ms: int
     isrc: str | None
+    source_url: str | None = None   # direct download URL (set for YT/SC entries)
 
     @property
     def primary_artist(self) -> str:
@@ -28,7 +29,9 @@ class Track:
 
     @property
     def search_query(self) -> str:
-        return f"{self.primary_artist} - {self.title}"
+        if self.artists:
+            return f"{self.primary_artist} - {self.title}"
+        return self.title
 
 
 def _extract_playlist_id(url_or_id: str) -> str:

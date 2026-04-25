@@ -57,11 +57,19 @@ This is not the same as a true permission error (read-only file, ACL issue). Gen
 2. A paid API (GetSongBPM free tier, Tunebat scraping, etc.) — covers mainstream well, misses underground.
 3. Mixed In Key desktop app (gold standard, paid, manual workflow).
 
-## BPM clamping to [70, 180] is intentional
+## BPM clamping to [85, 200] + start_bpm=150 is intentional
 
-`analyzer.py:52-55` doubles BPMs under 70 and halves BPMs over 180. `librosa.beat.beat_track` commonly reports half-time or double-time values — a 128 BPM house track might come back as 64 or 256. The clamp corrects for this.
+`analyzer.py:_detect_bpm()` passes `start_bpm=150` to librosa's beat tracker (overriding its default of 120) and clamps the result to `[85, 200]` — doubles anything under 85, halves anything over 200. Tuned for DJ electronic music including D&B and hardcore on the top end.
 
-The tradeoff: genuine outliers get wrong values. 60 BPM ambient becomes 120, 200 BPM DnB becomes 100. If the user's library skews that way, change the bounds — don't remove the clamp entirely or every other track will be in the wrong octave.
+Why these specific numbers:
+
+- `start_bpm=150` biases the autocorrelation pick toward DJ tempos. Default `start_bpm=120` systematically under-picks on D&B/fast-trap, reporting e.g. 83 BPM for a 166 BPM track (the autocorrelation has peaks at both 83 and 166, and ties go to whichever is closer to start_bpm).
+- Clamp `[85, 200]`. The bounds are **non-overlapping**: doubling `< 85` caps at 170 (never triggers halve); halving `> 200` floors at 100 (never triggers double). This avoids an infinite loop you'd hit with bounds like `[90, 180]` where 90 doubles to 180, gets halved to 90, and oscillates.
+- The upper bound was originally 170. That **wrongly halved genuine D&B and hardcore tracks** (user reported a 185 BPM track being destroyed). 200 is the right ceiling for house/techno/D&B/fast-trap libraries. Raise further only if the library includes breakcore / speedcore (200+ BPM).
+
+The remaining tradeoff: genuine **sub-85 BPM tracks get wrongly doubled**. Boom-bap hip-hop at 75-85 BPM becomes 150-170. For those, the user edits `index.csv` manually and reruns with `--bucket-by-bpm` — the sync pass re-tags from the CSV. Alternatively, `--reanalyze` re-runs the detector on existing MP3s (useful after tuning the algorithm itself).
+
+Do not widen the clamp without re-deriving the non-overlap guarantee. Specifically: `lower * 2 ≤ upper` AND `upper / 2 ≥ lower` must both hold. A single infinite loop in `_detect_bpm` hangs the whole run silently — there's no timeout.
 
 ## Rekordbox reads `TKEY` as-is
 
