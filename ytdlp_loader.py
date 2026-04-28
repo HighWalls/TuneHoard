@@ -1,8 +1,9 @@
-"""Fetch tracks from a YouTube or SoundCloud playlist via yt-dlp.
+"""Fetch tracks from a YouTube or SoundCloud URL via yt-dlp.
 
-Returns the same `Track` shape as the Spotify loader so the rest of the pipeline
-doesn't care where the playlist came from. Entries carry a `source_url` so the
-downloader can fetch them directly instead of doing a title-based search.
+Handles both playlists and single videos/tracks. Returns the same `Track`
+shape as the Spotify loader so the rest of the pipeline doesn't care where
+the input came from. Entries carry a `source_url` so the downloader can fetch
+them directly instead of doing a title-based search.
 """
 
 import re
@@ -39,10 +40,33 @@ def _parse_artist_title(raw_title: str, uploader: str) -> tuple[str, str]:
     return (uploader or "").strip(), cleaned or raw_title.strip()
 
 
-def get_ytdlp_playlist(url: str, id_prefix: str) -> tuple[str, list[Track]]:
-    """Fetch a YouTube or SoundCloud playlist. `id_prefix` is 'yt' or 'sc'
-    and is used to namespace the spotify_id column so YT/SC/Spotify IDs
-    can't collide."""
+def _entry_to_track(entry: dict, id_prefix: str) -> Track | None:
+    eid = entry.get("id") or ""
+    if not eid:
+        return None
+    raw_title = entry.get("title") or ""
+    uploader = entry.get("uploader") or entry.get("channel") or entry.get("artist") or ""
+    artist, title = _parse_artist_title(raw_title, uploader)
+    # webpage_url is the canonical watch URL; entry["url"] is sometimes the
+    # signed media URL (single-video extract) which expires. Prefer webpage_url.
+    source_url = entry.get("webpage_url") or entry.get("url") or ""
+    duration_s = entry.get("duration") or 0
+    return Track(
+        spotify_id=f"{id_prefix}:{eid}",
+        title=title,
+        artists=[artist] if artist else [],
+        album=entry.get("album") or "",
+        duration_ms=int(float(duration_s) * 1000),
+        isrc=None,
+        source_url=source_url,
+    )
+
+
+def get_ytdlp_tracks(url: str, id_prefix: str) -> tuple[str, list[Track]]:
+    """Fetch tracks from a YouTube or SoundCloud URL — either a playlist or a
+    single video/track. `id_prefix` is 'yt' or 'sc' and namespaces the
+    spotify_id column so cross-source IDs can't collide. Single-track URLs
+    return a folder name of 'singles' so they accumulate in one place."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -52,30 +76,12 @@ def get_ytdlp_playlist(url: str, id_prefix: str) -> tuple[str, list[Track]]:
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
+    # Single video/track has no `entries` key; playlists do.
+    if "entries" not in info:
+        track = _entry_to_track(info, id_prefix)
+        return "singles", ([track] if track else [])
+
     playlist_name = info.get("title") or f"{id_prefix}_playlist"
     entries = info.get("entries") or []
-
-    tracks: list[Track] = []
-    for entry in entries:
-        if entry is None:
-            continue
-        eid = entry.get("id") or ""
-        if not eid:
-            continue
-        raw_title = entry.get("title") or ""
-        uploader = entry.get("uploader") or entry.get("channel") or entry.get("artist") or ""
-        artist, title = _parse_artist_title(raw_title, uploader)
-        source_url = entry.get("url") or entry.get("webpage_url") or ""
-        duration_s = entry.get("duration") or 0
-        tracks.append(
-            Track(
-                spotify_id=f"{id_prefix}:{eid}",
-                title=title,
-                artists=[artist] if artist else [],
-                album=entry.get("album") or "",
-                duration_ms=int(float(duration_s) * 1000),
-                isrc=None,
-                source_url=source_url,
-            )
-        )
+    tracks = [t for t in (_entry_to_track(e, id_prefix) for e in entries if e) if t]
     return playlist_name, tracks

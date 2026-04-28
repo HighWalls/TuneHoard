@@ -41,6 +41,53 @@ def _extract_playlist_id(url_or_id: str) -> str:
     return url_or_id.strip()
 
 
+def _extract_track_id(url_or_id: str) -> str:
+    m = re.search(r"track[/:]([A-Za-z0-9]+)", url_or_id)
+    if m:
+        return m.group(1)
+    return url_or_id.strip()
+
+
+def _spotify_client(
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str = "http://127.0.0.1:8888/callback",
+    cache_path: str | Path = ".spotify_cache",
+) -> spotipy.Spotify:
+    auth = SpotifyOAuth(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        scope="playlist-read-private playlist-read-collaborative",
+        cache_path=str(cache_path),
+        open_browser=True,
+    )
+    return spotipy.Spotify(auth_manager=auth)
+
+
+def _spotify_track_to_track(t: dict) -> Track:
+    return Track(
+        spotify_id=t["id"],
+        title=t["name"],
+        artists=[a["name"] for a in t["artists"]],
+        album=t["album"]["name"],
+        duration_ms=t["duration_ms"],
+        isrc=(t.get("external_ids") or {}).get("isrc"),
+    )
+
+
+def get_track(
+    track_url: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str = "http://127.0.0.1:8888/callback",
+    cache_path: str | Path = ".spotify_cache",
+) -> tuple[str, list[Track]]:
+    sp = _spotify_client(client_id, client_secret, redirect_uri, cache_path)
+    t = sp.track(_extract_track_id(track_url))
+    return "singles", [_spotify_track_to_track(t)]
+
+
 def get_playlist_tracks(
     playlist_url: str,
     client_id: str,

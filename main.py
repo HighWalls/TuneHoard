@@ -1,7 +1,11 @@
-"""Spotify playlist → YouTube/SoundCloud MP3 downloads with BPM + Camelot key tags.
+"""Spotify / YouTube / SoundCloud URL → MP3 downloads with BPM + Camelot key tags.
+
+Accepts playlist URLs (all three platforms) or single track / video URLs
+(Spotify track, YouTube video, SoundCloud track). Singles land in a `singles/`
+subfolder under --out.
 
 Usage:
-    python main.py <spotify_playlist_url>
+    python main.py <url>
         [--sources youtube,soundcloud] [--out DIR]
         [--limit N] [--skip-existing]
         [--bucket-by-bpm] [--reanalyze]
@@ -27,9 +31,9 @@ from tqdm import tqdm
 
 from analyzer import analyze
 from downloader import download_track, download_url
-from spotify_client import Track, get_playlist_tracks
+from spotify_client import Track, get_playlist_tracks, get_track
 from tagger import tag_file
-from ytdlp_loader import get_ytdlp_playlist, is_soundcloud_url, is_youtube_url
+from ytdlp_loader import get_ytdlp_tracks, is_soundcloud_url, is_youtube_url
 
 
 _SANITIZE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -296,7 +300,10 @@ def reanalyze_rows(rows: list[dict], out_dir: Path) -> int:
 def main() -> int:
     load_dotenv()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("playlist", help="Spotify playlist URL or ID")
+    ap.add_argument(
+        "url",
+        help="Spotify / YouTube / SoundCloud URL — playlist or single track",
+    )
     ap.add_argument(
         "--sources",
         default="youtube,soundcloud",
@@ -329,13 +336,13 @@ def main() -> int:
         if s not in ("youtube", "soundcloud"):
             sys.exit(f"Invalid source '{s}' — must be 'youtube' or 'soundcloud'")
 
-    url = args.playlist
+    url = args.url
     if is_youtube_url(url):
-        print("Fetching YouTube playlist...")
-        playlist_name, tracks = get_ytdlp_playlist(url, "yt")
+        print("Fetching from YouTube...")
+        playlist_name, tracks = get_ytdlp_tracks(url, "yt")
     elif is_soundcloud_url(url):
-        print("Fetching SoundCloud playlist...")
-        playlist_name, tracks = get_ytdlp_playlist(url, "sc")
+        print("Fetching from SoundCloud...")
+        playlist_name, tracks = get_ytdlp_tracks(url, "sc")
     else:
         cid = os.getenv("SPOTIFY_CLIENT_ID")
         cs = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -344,8 +351,12 @@ def main() -> int:
                 "Missing SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET "
                 "(copy .env.example to .env). Not required for YouTube/SoundCloud URLs."
             )
-        print("Fetching Spotify playlist...")
-        playlist_name, tracks = get_playlist_tracks(url, cid, cs)
+        if "/track/" in url or url.startswith("spotify:track:"):
+            print("Fetching Spotify track...")
+            playlist_name, tracks = get_track(url, cid, cs)
+        else:
+            print("Fetching Spotify playlist...")
+            playlist_name, tracks = get_playlist_tracks(url, cid, cs)
     print(f"  → '{playlist_name}' ({len(tracks)} tracks)")
 
     if args.limit > 0:

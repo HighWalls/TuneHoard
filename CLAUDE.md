@@ -4,15 +4,16 @@ Primer for any agent working on this project. Read this first — it's short on 
 
 ## What this is
 
-A Python CLI that takes a **Spotify, YouTube, or SoundCloud playlist URL**, gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist with a sorted `index.csv` for DJ prep.
+A Python CLI that takes a **Spotify, YouTube, or SoundCloud URL** — playlist *or* single track / video — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
 
-- **Spotify** playlists: tracks are searched on YouTube / SoundCloud and the first match is downloaded. Artist and title come from Spotify (reliable).
-- **YouTube / SoundCloud** playlists: each entry's URL is downloaded directly (no search). Artist/title is best-effort parsed from the video title — `"Artist - Title"` split, falling back to the uploader as artist. Less reliable metadata than Spotify.
+- **Spotify** playlists / tracks: search on YouTube / SoundCloud and download the first match. Artist and title come from Spotify (reliable).
+- **YouTube / SoundCloud** playlists / videos: each entry's URL is downloaded directly (no search). Artist/title is best-effort parsed from the video title — `"Artist - Title"` split, falling back to the uploader as artist. Less reliable metadata than Spotify.
+- **Single tracks** (any source): land in `<out>/singles/` so they accumulate together. The same `--skip-existing` dedup applies, so adding more singles incrementally won't re-download.
 
 ## Run it
 
 ```bash
-python main.py <spotify_playlist_url>
+python main.py <url>
     [--sources youtube,soundcloud]  # comma list, tried in order (default)
     [--out downloads]                # output directory
     [--limit N]                      # only process first N tracks
@@ -21,6 +22,8 @@ python main.py <spotify_playlist_url>
     [--reanalyze]                    # re-run BPM/key on existing MP3s (implies --skip-existing)
 ```
 
+`<url>` can be a playlist or single-track URL on Spotify, YouTube, or SoundCloud.
+
 `ffmpeg` must be on PATH (system install, not pip) and `pip install -r requirements.txt`. Spotify URLs additionally need `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` and a one-time browser OAuth authorization on first run (cached to `.spotify_cache`); YouTube / SoundCloud URLs need neither. The redirect URI registered in the Spotify dashboard must match the one in `spotify_client.py` (default `http://127.0.0.1:8888/callback`).
 
 ## File map
@@ -28,8 +31,8 @@ python main.py <spotify_playlist_url>
 | File | Responsibility |
 |---|---|
 | `main.py` | CLI, URL dispatch, orchestration, filename formatting, CSV export |
-| `spotify_client.py` | Spotify playlist URL → `list[Track]` via spotipy (OAuth user flow). Also defines the `Track` dataclass. |
-| `ytdlp_loader.py` | YouTube / SoundCloud playlist URL → `list[Track]` via yt-dlp. Entries carry a `source_url` for direct download. |
+| `spotify_client.py` | Spotify playlist or track URL → `list[Track]` via spotipy (OAuth user flow). Defines the `Track` dataclass; `get_playlist_tracks()` for playlists, `get_track()` for single tracks. |
+| `ytdlp_loader.py` | YouTube / SoundCloud playlist or single video URL → `list[Track]` via yt-dlp. Entries carry a `source_url` for direct download. Single-video URLs return folder name `"singles"`. |
 | `downloader.py` | yt-dlp wrapper with two modes: `download_url()` (direct) for YT/SC entries, `download_track()` (search) for Spotify-derived tracks. |
 | `analyzer.py` | librosa: BPM (beat tracker) + key (Krumhansl-Schmuckler on chroma) |
 | `camelot.py` | `(root, mode) → Camelot notation` lookup (e.g. `"A", "minor" → "8A"`) |
