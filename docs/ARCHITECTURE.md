@@ -1,4 +1,4 @@
-# TuneHoarder — Architecture
+# TuneHoard — Architecture
 
 Pipeline details and module contracts. Read `CLAUDE.md` first.
 

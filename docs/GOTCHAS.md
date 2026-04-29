@@ -1,6 +1,6 @@
-# TuneHoarder — Gotchas
+# TuneHoard — Gotchas
 
-Non-obvious design decisions and known failure modes in TuneHoarder. If something looks "wrong," check here before "fixing" it.
+Non-obvious design decisions and known failure modes in TuneHoard. If something looks "wrong," check here before "fixing" it.
 
 ## Do not call Spotify Audio Features
 

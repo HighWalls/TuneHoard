@@ -1,12 +1,12 @@
 # CLAUDE.md
 
-Primer for any agent working on **TuneHoarder**. Read this first — it's short on purpose.
+Primer for any agent working on **TuneHoard**. Read this first — it's short on purpose.
 
 ## What this is
 
-TuneHoarder is a Python CLI that takes a **Spotify, YouTube, or SoundCloud URL** — playlist *or* single track / video — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
+TuneHoard is a Python CLI that takes a **Spotify, YouTube, or SoundCloud URL** — playlist *or* single track / video — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
 
-Repo: https://github.com/HighWalls/TuneHoarder
+Repo: https://github.com/HighWalls/TuneHoard
 
 - **Spotify** playlists / tracks: search on YouTube / SoundCloud and download the first match. Artist and title come from Spotify (reliable).
 - **YouTube / SoundCloud** playlists / videos: each entry's URL is downloaded directly (no search). Artist/title is best-effort parsed from the video title — `"Artist - Title"` split, falling back to the uploader as artist. Less reliable metadata than Spotify.
