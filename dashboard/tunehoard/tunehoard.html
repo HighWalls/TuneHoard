@@ -1,0 +1,1853 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TuneHoard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --mono: 'IBM Plex Mono','JetBrains Mono','Courier New',monospace;
+  --ink: #000000;
+  --paper: #FFFFFF;
+  --bg: var(--paper);
+  --fg: var(--ink);
+  --zebra: color-mix(in srgb, var(--ink) 6%, var(--paper));
+}
+*,*::before,*::after{ box-sizing: border-box; border-radius: 0 !important; }
+html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg); }
+body{
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  font-feature-settings: "ss01","zero";
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+  padding: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* No animations, ever. Except blink. */
+*,*::before,*::after{ transition:none !important; animation-duration:0s !important; }
+@keyframes blink { 0%,49%{ opacity:1 } 50%,100%{ opacity:0 } }
+.blink{ animation: blink 1s steps(1,end) infinite !important; animation-duration:1s !important; }
+
+/* Selection inverted */
+::selection{ background:var(--ink); color:var(--paper); }
+
+/* Scrollbar — Smalltalk-style */
+*::-webkit-scrollbar{ width:14px; height:14px; }
+*::-webkit-scrollbar-track{ background:var(--paper); border-left:1px solid var(--ink); }
+*::-webkit-scrollbar-thumb{ background:var(--ink); border:1px solid var(--ink); }
+*::-webkit-scrollbar-button:single-button{
+  background:var(--paper); border:1px solid var(--ink);
+  display:block; height:14px; width:14px;
+  background-repeat:no-repeat; background-position:center;
+}
+*::-webkit-scrollbar-button:vertical:decrement{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><polygon points='5,2 9,8 1,8' fill='black'/></svg>"); }
+*::-webkit-scrollbar-button:vertical:increment{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><polygon points='1,2 9,2 5,8' fill='black'/></svg>"); }
+*::-webkit-scrollbar-button:horizontal:decrement{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><polygon points='2,5 8,1 8,9' fill='black'/></svg>"); }
+*::-webkit-scrollbar-button:horizontal:increment{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><polygon points='2,1 8,5 2,9' fill='black'/></svg>"); }
+
+/* Containers */
+.box{ border:1px solid var(--ink); background:var(--paper); }
+.box + .box{ border-top:0; }
+.box-title{
+  border-bottom:1px solid var(--ink);
+  padding:4px 8px;
+  display:flex; align-items:center; justify-content:space-between;
+  gap:12px;
+  white-space:nowrap;
+  overflow:hidden;
+}
+.box-title .label{ font-weight:600; letter-spacing:0.02em; }
+.box-body{ padding:10px 12px; }
+
+/* Buttons */
+.btn{
+  font-family: var(--mono);
+  font-size: 13px;
+  background:var(--paper);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  padding:4px 10px;
+  cursor:pointer;
+  box-shadow: 2px 2px 0 0 var(--ink);
+  position:relative;
+  user-select:none;
+  display:inline-flex;
+  align-items:center;
+  white-space:nowrap;
+}
+.btn:hover{ background:var(--ink); color:var(--paper); }
+.btn:active, .btn.pressed{
+  box-shadow: 0 0 0 0 var(--ink);
+  transform: translate(2px,2px);
+}
+.btn[disabled]{ color:color-mix(in srgb, var(--ink) 50%, var(--paper)); border-color:color-mix(in srgb, var(--ink) 50%, var(--paper)); box-shadow:2px 2px 0 0 color-mix(in srgb, var(--ink) 50%, var(--paper)); cursor:not-allowed; }
+.btn.tiny{ padding:0 6px; font-size:12px; }
+.btn-row{ display:flex; gap:10px; flex-wrap:wrap; }
+
+/* Text-style links (1995 web) */
+a.tlink, .tlink{
+  color:var(--ink); text-decoration:underline; cursor:pointer;
+}
+a.tlink:hover, .tlink:hover{ background:var(--ink); color:var(--paper); text-decoration:underline; }
+
+/* Inputs */
+input[type="text"], input[type="number"], input[type="password"], textarea, select{
+  font-family: var(--mono);
+  font-size: 13px;
+  background:var(--paper);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  padding:4px 6px;
+  outline:none;
+}
+input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus{
+  background:var(--ink); color:var(--paper);
+}
+input[type="text"]:focus::placeholder{ color:color-mix(in srgb, var(--ink) 30%, var(--paper)); }
+
+/* Header */
+.header{
+  border:1px solid var(--ink);
+  padding:10px 14px 8px;
+  margin-bottom:0;
+  position:relative;
+}
+/* Logo styling for big ASCII art */
+.logo{
+  font-family: var(--mono);
+  font-weight:700;
+  text-align:center;
+  white-space:pre;
+  line-height:1;
+  font-size:13px;
+  letter-spacing:0;
+  user-select:none;
+  overflow:hidden;
+}
+.tagline{
+  text-align:center;
+  margin-top:8px;
+  font-size:13px;
+}
+/* Theme switcher (top-left of header) */
+.theme-bar{
+  position:absolute; top:6px; left:10px;
+  display:flex; flex-direction:column; gap:6px; align-items:flex-start;
+  font-size:12px;
+  z-index:5;
+}
+.theme-bar .btn.tiny{
+  padding:2px 8px;
+  font-size:12px;
+  box-shadow: 2px 2px 0 0 var(--ink);
+}
+.theme-options{ display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+.theme-options.hidden{ display:none; }
+.theme-swatch{
+  display:inline-block;
+  width:18px; height:10px;
+  border:1px solid var(--ink);
+  margin-right:6px;
+  vertical-align:-1px;
+  background: linear-gradient(to right, var(--sw-ink) 0 50%, var(--sw-paper) 50% 100%);
+}
+.theme-swatch.random{
+  background: var(--paper);
+  color: var(--ink);
+  font-size:9px;
+  line-height:8px;
+  text-align:center;
+  letter-spacing:0;
+}
+.theme-flash{
+  font-family:var(--mono);
+  font-size:12px;
+  user-select:none;
+  opacity:1;
+  transition: opacity 1.5s linear;
+}
+.theme-flash.fade{ opacity:0; }
+
+.header-tools{
+  position:absolute; top:6px; right:10px;
+  font-size:12px;
+  display:flex; gap:8px;
+}
+
+/* Inset fieldset-style label */
+.inset-label{
+  display:flex; align-items:center;
+  gap:6px;
+  margin-top:-21px; margin-bottom:6px;
+  background:var(--paper);
+  width:max-content;
+  padding:2px 8px;
+  font-weight:600;
+  letter-spacing:0.02em;
+  position:relative; left:8px;
+  line-height:1;
+}
+
+/* URL input */
+.url-row{ display:flex; gap:10px; align-items:stretch; }
+.url-row input[type="text"]{ flex:1; padding:8px 10px; font-size:14px; }
+.status-line{ margin-top:8px; min-height:1.45em; font-size:13px; }
+.status-line.ok::before{ content:">> "; }
+.status-line.err{ font-weight:700; }
+.status-line.err::before{ content:"!! "; }
+
+.checkrow{
+  display:flex; gap:24px; flex-wrap:wrap;
+  margin-top:10px; margin-bottom:8px;
+  user-select:none;
+}
+.checkbox{ cursor:pointer; }
+.checkbox.on{ font-weight:700; }
+
+/* Jobs */
+.job{
+  border:1px solid var(--ink);
+  padding:8px 10px;
+  margin-top:10px;
+  font-size:13px;
+}
+.job:first-child{ margin-top:0; }
+.job-head{
+  display:flex; justify-content:space-between; align-items:center;
+  gap:10px;
+}
+.job-title{ font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.job-actions{ display:flex; gap:6px; flex-shrink:0; }
+.bar-line{ margin-top:6px; display:flex; align-items:center; gap:8px; white-space:nowrap; }
+.bar{
+  display:inline-block;
+  font-family:var(--mono);
+  white-space:pre;
+  letter-spacing:0;
+  user-select:none;
+}
+.job-meta{ display:flex; gap:18px; margin-top:4px; color:var(--ink); }
+.job-current{ margin-top:4px; }
+.job-current::before{ content:"> "; }
+
+.log-pane{
+  margin-top:8px;
+  border:1px solid var(--ink);
+  background:var(--paper);
+  height:140px;
+  overflow:auto;
+  padding:6px 8px;
+  font-size:12px;
+  white-space:pre;
+}
+
+/* Library */
+.lib-body{ padding:10px 12px 0 !important; }
+.filterbar{
+  display:flex; gap:18px; align-items:center; flex-wrap:wrap;
+  padding-bottom:8px;
+  border-bottom:1px solid var(--ink);
+  margin-bottom:0;
+}
+.filterbar > *{ font-size:13px; }
+.filterbar input[type="text"]{ width:220px; }
+.filterbar input.bpm{ width:60px; text-align:center; }
+.filterbar input.cam{ width:90px; text-align:center; text-transform:uppercase; }
+.cam-wrap{ display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; max-width:360px; }
+.cam-chip{
+  display:inline-flex; align-items:center; gap:4px;
+  border:1px solid var(--ink);
+  background:var(--ink); color:var(--paper);
+  padding:0 4px 0 6px;
+  font-family:var(--mono); font-size:13px;
+  text-transform:uppercase;
+  user-select:none;
+  line-height:1.4;
+}
+.cam-chip .x{ cursor:pointer; padding:0 2px; }
+.cam-chip .x:hover{ background:var(--paper); color:var(--ink); }
+.radio-line{ display:flex; gap:10px; user-select:none; cursor:default; }
+.radio{ cursor:pointer; }
+.radio.on{ font-weight:700; }
+
+.tbl-wrap{ overflow:auto; max-height:520px; }
+table.lib{
+  border-collapse:collapse;
+  width:100%;
+  font-family:var(--mono);
+  font-size:13px;
+}
+table.lib th, table.lib td{
+  border:1px solid var(--ink);
+  padding:4px 8px;
+  text-align:left;
+  vertical-align:top;
+}
+table.lib thead th{
+  background:var(--ink);
+  color:var(--paper);
+  font-weight:700;
+  position:sticky; top:0;
+  cursor:pointer;
+  user-select:none;
+}
+table.lib thead th .sort{ display:inline-block; width:1ch; margin-left:4px; opacity:0.85; }
+table.lib tbody tr:nth-child(even) td{ background:var(--zebra); }
+table.lib tbody tr.sel td{ background:var(--ink) !important; color:var(--paper); }
+table.lib tbody tr.sel td .tlink{ color:var(--paper); text-decoration:underline; }
+table.lib td.bpm{ text-align:right; font-variant-numeric: tabular-nums; }
+table.lib td.cam{ text-transform:uppercase; }
+table.lib td.tightw{ width:1%; white-space:nowrap; }
+table.lib tr.expand-row td{
+  padding:10px 12px;
+  background:var(--paper) !important;
+  color:var(--ink) !important;
+}
+table.lib tbody tr{ cursor:pointer; }
+
+/* Bucket tree */
+.tree{
+  font-family:var(--mono);
+  font-size:13px;
+  white-space:pre;
+  padding:10px 0 6px;
+  user-select:none;
+}
+.tree-line{
+  display:flex;
+  align-items:baseline;
+  padding:2px 12px;
+  cursor:pointer;
+  white-space:pre;
+}
+.bucket-row{ font-weight:600; display:flex; justify-content:space-between; }
+.bucket-row .b-label{ flex:1; }
+.bucket-row .b-count{ text-align:right; white-space:pre; }
+.bucket-row.empty{ color:color-mix(in srgb, var(--ink) 50%, var(--paper)); cursor:default; }
+.bucket-row.empty:hover{ background:var(--paper); color:color-mix(in srgb, var(--ink) 50%, var(--paper)); }
+.bucket-row:hover{ background:var(--ink); color:var(--paper); }
+.bucket-row.drop-hover{ background:var(--ink) !important; color:var(--paper) !important; }
+.bucket-row.drop-hover *{ color:var(--paper) !important; }
+
+.track-row{
+  display:flex;
+  padding:1px 12px 1px 12px;
+  white-space:pre;
+  cursor:pointer;
+}
+.track-row:hover{ background:var(--ink); color:var(--paper); }
+.track-row.sel{ background:var(--ink); color:var(--paper); }
+.track-row.moved{ background:var(--ink); color:var(--paper); font-weight:700; }
+.track-row.moved:hover{ background:var(--ink); color:var(--paper); }
+.track-indent{ display:inline-block; width:6ch; }
+.track-moved-flag{ display:inline-block; width:3ch; font-weight:900; }
+.track-cam{ display:inline-block; width:11ch; }
+.track-bpm{ display:inline-block; width:5ch; text-align:right; font-variant-numeric: tabular-nums; }
+.track-sep{ display:inline-block; width:3ch; text-align:center; }
+.track-artist{ display:inline-block; width:18ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.track-title{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:8ch; }
+.track-source{ display:inline-block; width:5ch; text-align:right; }
+.track-row.dragging{ opacity:0.35; }
+
+.track-edit{
+  padding:8px 12px 8px calc(12px + 6ch);
+  background:var(--paper);
+  border-top:1px dotted var(--ink);
+  border-bottom:1px dotted var(--ink);
+}
+
+/* Drag ghost */
+.drag-ghost{
+  position:fixed;
+  z-index:100;
+  pointer-events:none;
+  background:var(--paper);
+  color:var(--ink);
+  border:1px dotted var(--ink);
+  padding:3px 8px;
+  font-family:var(--mono);
+  font-size:13px;
+  white-space:nowrap;
+  font-weight:600;
+}
+
+/* Toast */
+.toast{
+  position:fixed;
+  left:50%; bottom:24px;
+  transform:translateX(-50%);
+  background:var(--paper);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  box-shadow:2px 2px 0 0 var(--ink);
+  padding:6px 14px;
+  font-family:var(--mono);
+  font-size:13px;
+  z-index:90;
+  white-space:pre;
+}
+
+/* Context menu */
+.ctx-menu{
+  position:fixed;
+  z-index:120;
+  background:var(--paper);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  box-shadow:2px 2px 0 0 var(--ink);
+  font-family:var(--mono);
+  font-size:13px;
+  min-width:240px;
+  padding:0;
+}
+.ctx-menu .ctx-item{
+  padding:4px 12px;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.ctx-menu .ctx-item:hover{ background:var(--ink); color:var(--paper); }
+.ctx-menu .ctx-sep{ border-top:1px solid var(--ink); }
+
+.edit-form{
+  display:flex; gap:14px; flex-wrap:wrap; align-items:center;
+}
+.edit-form .lbl{ display:inline-flex; gap:6px; align-items:center; }
+.edit-form input{ width:80px; text-align:center; }
+
+.selbar{
+  border:1px solid var(--ink);
+  border-top:0;
+  padding:8px 10px;
+  display:flex; gap:14px; align-items:center; justify-content:space-between;
+  background:var(--paper);
+}
+
+/* Footer */
+.footer{
+  text-align:center;
+  margin-top:18px;
+  font-size:12px;
+  line-height:1.5;
+  color:var(--ink);
+}
+.footer .rule{
+  display:block;
+  width:100%;
+  white-space:nowrap;
+  overflow:hidden;
+  font-family:var(--mono);
+  line-height:1;
+}
+.footer .rule::before{
+  content:"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~";
+  display:block;
+}
+
+/* Settings */
+.fset{ border:1px solid var(--ink); padding:14px 14px 10px; margin-top:14px; position:relative; }
+.fset .inset-label{ position:relative; }
+.fset .row{ display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+.fset .row .label{ width:160px; }
+.fset .path-input{ flex:1; min-width:240px; }
+.status-pill{
+  display:inline-block; border:1px solid var(--ink);
+  padding:0 6px;
+  background:var(--paper); color:var(--ink);
+}
+.status-pill.bad{ background:var(--ink); color:var(--paper); }
+.source-list{ list-style:none; padding:0; margin:0; }
+.source-list li{
+  display:flex; align-items:center; gap:8px;
+  border:1px solid var(--ink);
+  padding:4px 8px;
+  margin-top:-1px;
+}
+.source-list li:first-child{ margin-top:0; }
+.source-list .name{ flex:1; }
+
+/* Welcome / modal */
+.overlay{
+  position:fixed; inset:0;
+  z-index:50;
+  background-image:
+    linear-gradient(45deg,var(--ink) 25%,transparent 25%),
+    linear-gradient(-45deg,var(--ink) 25%,transparent 25%),
+    linear-gradient(45deg,transparent 75%,var(--ink) 75%),
+    linear-gradient(-45deg,transparent 75%,var(--ink) 75%);
+  background-size: 6px 6px;
+  background-position: 0 0, 0 3px, 3px -3px, -3px 0;
+  display:flex; align-items:center; justify-content:center;
+  padding:24px;
+}
+.welcome{
+  background:var(--paper);
+  border:1px solid var(--ink);
+  box-shadow: 4px 4px 0 0 var(--ink);
+  padding:18px 22px 22px;
+  width:540px;
+  max-width:100%;
+}
+.welcome h2{ text-align:center; margin:0 0 4px; font-size:16px; letter-spacing:0.04em; }
+.welcome .rule{ text-align:center; white-space:pre; margin-bottom:14px; }
+.welcome .field{ display:flex; gap:8px; margin:8px 0 14px; }
+.welcome .field input{ flex:1; }
+.welcome .center{ text-align:center; margin-top:14px; }
+
+/* Visibility helper */
+.hidden{ display:none !important; }
+
+/* Misc text */
+.muted{ color:var(--ink); opacity:0.65; }
+.kbd{ border:1px solid var(--ink); padding:0 4px; }
+
+hr.tilde{
+  border:0; height:auto; line-height:1; margin:8px 0;
+  font-family:var(--mono); white-space:pre; overflow:hidden;
+  color:var(--ink);
+}
+hr.tilde::before{
+  content:"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~";
+  display:block;
+}
+
+/* Settings back link */
+.back{ font-size:12px; }
+
+/* Inline ASCII art empty state */
+.empty-art{
+  white-space:pre;
+  text-align:center;
+  padding:30px 0 24px;
+  line-height:1.2;
+  font-size:13px;
+}
+
+/* Browse-style placeholder for collapsed jobs */
+.collapsed-line{ font-weight:600; }
+
+/* Show/hide secret */
+.input-with-action{ display:flex; gap:6px; align-items:center; }
+.input-with-action input{ flex:1; }
+
+/* Settings header bar */
+.subheader{
+  display:flex; align-items:center; justify-content:space-between;
+  border:1px solid var(--ink);
+  padding:6px 10px;
+  margin-bottom:0;
+}
+.subheader .title{ font-weight:700; letter-spacing:0.04em; }
+</style>
+<script>
+// Apply persisted palette before first paint to avoid a flash.
+(function(){
+  try{
+    var saved = JSON.parse(localStorage.getItem('pploader.theme') || 'null');
+    if(saved && saved.ink && saved.paper){
+      document.documentElement.style.setProperty('--ink', saved.ink);
+      document.documentElement.style.setProperty('--paper', saved.paper);
+    }
+  } catch(e){}
+})();
+</script>
+</head>
+<body>
+
+<!-- ============== MAIN VIEW ============== -->
+<div id="main-view">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="theme-bar" id="theme-bar">
+      <button class="btn tiny" id="theme-toggle">[ Theme ▾ ]</button>
+      <div class="theme-options hidden" id="theme-options"></div>
+      <span class="theme-flash fade" id="theme-flash"></span>
+    </div>
+    <div class="header-tools">
+      <a class="tlink" id="open-settings">[Settings]</a>
+      <a class="tlink" id="open-about">[About]</a>
+    </div>
+<pre class="logo"> ::::::::::: :::    ::: ::::    ::: :::::::::: :::    :::  ::::::::      :::     :::::::::  ::::::::: 
+     :+:     :+:    :+: :+:+:   :+: :+:        :+:    :+: :+:    :+:   :+: :+:   :+:    :+: :+:    :+: 
+    +:+     +:+    +:+ :+:+:+  +:+ +:+        +:+    +:+ +:+    +:+  +:+   +:+  +:+    +:+ +:+    +:+  
+   +#+     +#+    +:+ +#+ +:+ +#+ +#++:++#   +#++:++#++ +#+    +:+ +#++:++#++: +#++:++#:  +#+    +:+   
+  +#+     +#+    +#+ +#+  +#+#+# +#+        +#+    +#+ +#+    +#+ +#+     +#+ +#+    +#+ +#+    +#+    
+ #+#     #+#    #+# #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#     #+# #+#    #+# #+#    #+#     
+###      ########  ###    #### ########## ###    ###  ########  ###     ### ###    ### #########       
+</pre>
+    <div class="tagline">Spotify / YouTube / SoundCloud  →  MP3 with BPM + Camelot tags</div>
+  </div>
+
+  <!-- URL INPUT -->
+  <div class="box">
+    <div class="box-title">
+      <span class="label">~~ INPUT URL ~~</span>
+    </div>
+    <div class="box-body">
+      <div class="url-row">
+        <input id="url" type="text" placeholder="paste a Spotify, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
+        <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
+      </div>
+      <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
+
+      <div class="checkrow">
+        <span class="checkbox on" data-key="bucket">[x] Bucket by BPM</span>
+        <span class="checkbox on" data-key="analyze">[x] Analyze after download</span>
+        <span class="checkbox on" data-key="skip">[x] Skip existing</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVE JOBS -->
+  <div class="box" id="jobs-box">
+    <div class="box-title">
+      <span class="label" id="jobs-label">~~ ACTIVE JOBS (2) ~~</span>
+      <a class="tlink" id="jobs-toggle">[Collapse]</a>
+    </div>
+    <div class="box-body" id="jobs-body"></div>
+  </div>
+
+  <!-- LIBRARY -->
+  <div class="box">
+    <div class="box-title">
+      <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
+    </div>
+    <div class="box-body" style="padding:10px 12px 0;">
+      <div class="filterbar">
+        <input type="text" id="f-search" placeholder="search artist or title...">
+        <span class="radio-line" id="f-source">
+          <span class="radio on" data-val="all">(•) All</span>
+          <span class="radio" data-val="YT">( ) YouTube</span>
+          <span class="radio" data-val="SC">( ) SoundCloud</span>
+        </span>
+        <span>BPM:&nbsp;<input id="f-bpm-min" type="number" class="bpm" placeholder="___">&nbsp;-&nbsp;<input id="f-bpm-max" type="number" class="bpm" placeholder="___"></span>
+        <span class="cam-wrap">Camelot/Key:&nbsp;<span id="cam-chips" class="cam-wrap" style="gap:4px;"></span><input id="f-cam" type="text" class="cam" placeholder="8A/Am" maxlength="4"></span>
+        <a class="tlink" id="f-reset">[Reset filters]</a>
+      </div>
+      <div class="tbl-wrap" id="tbl-wrap">
+        <div class="tree" id="tree"></div>
+        <div id="lib-empty" class="hidden">
+          <pre class="empty-art">         +-----------------------+
+         |  no tracks yet        |
+         |  paste a URL above    |
+         |  to start             |
+         +-----------------------+</pre>
+        </div>
+      </div>
+    </div>
+    <!-- selection bar lives outside body so it touches the bottom border -->
+    <div class="selbar hidden" id="selbar">
+      <span id="sel-count">0 tracks selected</span>
+      <div class="btn-row">
+        <button class="btn">[ Re-analyze ]</button>
+        <button class="btn">[ Delete ]</button>
+        <button class="btn">[ Move to bucket ]</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div>TuneHoard v0.1 · github.com/HighWalls/TuneHoard</div>
+    <div class="rule"></div>
+    <div>enjoy responsibly</div>
+  </div>
+</div><!-- /main-view -->
+
+
+<!-- ============== SETTINGS VIEW ============== -->
+<div id="settings-view" class="hidden">
+  <div class="subheader">
+    <a class="tlink back" id="back-main">&lt;&lt; Back</a>
+    <span class="title">~~ SETTINGS ~~</span>
+    <span class="muted" style="font-size:12px;">auto-saves on blur</span>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ OUTPUT FOLDER ~~</div>
+    <div class="row">
+      <input id="s-out" class="path-input" type="text" value="C:\Users\HighWalls\Music\TuneHoard">
+      <button class="btn">[Browse...]</button>
+    </div>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ SPOTIFY ~~</div>
+    <div class="row">
+      <span class="label">Client ID:</span>
+      <input id="s-cid" type="text" style="flex:1;min-width:280px;" placeholder="(empty)">
+    </div>
+    <div class="row">
+      <span class="label">Client Secret:</span>
+      <span class="input-with-action" style="flex:1;min-width:280px;">
+        <input id="s-csec" type="password" placeholder="(empty)">
+        <a class="tlink" id="s-show">[show]</a>
+      </span>
+    </div>
+    <div class="row">
+      <span class="label">Status:</span>
+      <span class="status-pill bad">NOT CONNECTED</span>
+      <span style="flex:1;"></span>
+      <button class="btn">[ Authorize ]</button>
+    </div>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ SOURCES (drag to reorder) ~~</div>
+    <ul class="source-list" id="src-list">
+      <li><span>[YT]</span><span class="name">YouTube</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
+      <li><span>[SC]</span><span class="name">SoundCloud</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
+      <li><span>[SP]</span><span class="name">Spotify (re-find via YT/SC)</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
+    </ul>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ KEY FORMAT (TKEY tag + filename prefix) ~~</div>
+    <div style="margin-bottom:10px;">The on-screen library always shows both Camelot and musical notation.<br>This setting only changes what gets written to the ID3 TKEY tag and the leading chunk of each filename. Whichever you pick, the COMM tag still carries both formats so the file is portable.</div>
+    <div class="row" id="keyfmt-row" style="user-select:none;">
+      <span class="radio keyfmt on" data-val="camelot">(•) Camelot &mdash; '8A'&nbsp;&nbsp; for Rekordbox</span>
+      <span style="width:24px;"></span>
+      <span class="radio keyfmt" data-val="musical">( ) Musical &mdash; 'Am'&nbsp;&nbsp; for Traktor / Serato</span>
+    </div>
+    <div class="row" style="margin-top:6px;">
+      <span>Current filename example:&nbsp;&nbsp;<span id="keyfmt-example">8A - 128 - Mall Grab - Breathing.mp3</span></span>
+    </div>
+    <div id="keyfmt-nudge" class="hidden" style="margin-top:10px; padding:6px 8px; border:1px solid var(--ink); background:var(--paper);">
+      <div>! Existing files will be renamed + retagged on the next sync.</div>
+      <div>&nbsp;&nbsp;Run with <span class="kbd">--bucket-by-bpm</span> to apply.</div>
+    </div>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ ADVANCED ~~</div>
+    <div class="row">
+      <a class="tlink" id="adv-toggle">[Expand]</a>
+    </div>
+    <div id="adv-body" class="hidden">
+      <div class="row">
+        <span class="label">BPM clamp:</span>
+        min <input type="number" value="85" style="width:70px;">
+        max <input type="number" value="200" style="width:70px;">
+      </div>
+      <div class="row">
+        <span class="label">Analysis:</span>
+        duration <input type="number" value="120" style="width:70px;"> sec
+      </div>
+      <div class="row">
+        <span class="label">ffmpeg path:</span>
+        <input type="text" class="path-input" value="C:\Program Files\ffmpeg\bin\ffmpeg.exe">
+        <button class="btn">[Browse...]</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div>TuneHoard v0.1 · github.com/HighWalls/TuneHoard</div>
+    <div class="rule"></div>
+    <div>enjoy responsibly</div>
+  </div>
+</div><!-- /settings-view -->
+
+
+<!-- ============== WELCOME OVERLAY ============== -->
+<div id="welcome-overlay" class="overlay hidden">
+  <div class="welcome">
+    <h2>WELCOME TO TUNEHOARD</h2>
+    <div class="rule">~~~~~~~~~~~~~~~~~~~</div>
+    <div>Choose where downloads should go:</div>
+    <div class="field">
+      <input id="w-out" type="text" placeholder="C:\Users\you\Music\TuneHoard">
+      <button class="btn">[Browse...]</button>
+    </div>
+    <div>Optional: set up Spotify support</div>
+    <div class="muted">Skip if you only use YT / SoundCloud.</div>
+    <div class="field">
+      <input id="w-cid" type="text" placeholder="Spotify Client ID (optional)">
+    </div>
+    <div class="field">
+      <input id="w-csec" type="password" placeholder="Spotify Client Secret (optional)">
+    </div>
+    <div class="center">
+      <button class="btn" id="w-continue">[ Continue &gt;&gt; ]</button>
+    </div>
+  </div>
+</div>
+
+
+<script>
+/* =================================================================
+   TuneHoard — vanilla JS, mock data
+   ================================================================= */
+
+// ---------- theme switcher ----------
+const PALETTES = [
+  { ink: '#000000', paper: '#FFFFFF', name: 'Paper' },
+  { ink: '#33FF66', paper: '#0A0A0A', name: 'CRT Green' },
+  { ink: '#FFFFFF', paper: '#0000AA', name: 'DOS Blue' },
+  { ink: '#FFB000', paper: '#0A0A0A', name: 'Amber CRT' },
+  { ink: '#00FFFF', paper: '#000000', name: 'Cyan Term' },
+  { ink: '#000000', paper: '#F4D8A0', name: 'Cream Paper' },
+  { ink: '#FF80B0', paper: '#000000', name: 'Pink Synth' },
+  { ink: '#E0E0E0', paper: '#1A1A2E', name: 'Midnight' },
+  { ink: '#FFFFFF', paper: '#5C0000', name: 'Burgundy' },
+  { ink: '#000000', paper: '#C0FFC0', name: 'Mint Print' },
+];
+const PRESETS = ['Paper','CRT Green','DOS Blue'];
+let currentPalette = (function(){
+  try{
+    const saved = JSON.parse(localStorage.getItem('pploader.theme') || 'null');
+    if(saved){
+      const m = PALETTES.find(p => p.ink===saved.ink && p.paper===saved.paper);
+      return m || saved;
+    }
+  } catch(e){}
+  return PALETTES[0];
+})();
+function applyPalette(p){
+  currentPalette = p;
+  document.documentElement.style.setProperty('--ink', p.ink);
+  document.documentElement.style.setProperty('--paper', p.paper);
+  try{ localStorage.setItem('pploader.theme', JSON.stringify({ink:p.ink, paper:p.paper, name:p.name})); }catch(e){}
+}
+function renderThemeOptions(){
+  const opts = document.getElementById('theme-options');
+  if(!opts) return;
+  const presetButtons = PRESETS.map(name=>{
+    const p = PALETTES.find(x=>x.name===name);
+    return `<button class="btn tiny" data-theme="${name}"><span class="theme-swatch" style="--sw-ink:${p.ink};--sw-paper:${p.paper}"></span>${name}</button>`;
+  }).join('');
+  opts.innerHTML = presetButtons + `<button class="btn tiny" data-theme="__random">Randomize!</button>`;
+}
+function setupThemeBar(){
+  const bar = document.getElementById('theme-bar');
+  if(!bar) return;
+  const toggle = document.getElementById('theme-toggle');
+  const opts = document.getElementById('theme-options');
+  const flash = document.getElementById('theme-flash');
+  renderThemeOptions();
+  toggle.addEventListener('click', ()=>{
+    opts.classList.toggle('hidden');
+  });
+  opts.addEventListener('click', e=>{
+    const btn = e.target.closest('button[data-theme]');
+    if(!btn) return;
+    const key = btn.dataset.theme;
+    let chosen;
+    if(key === '__random'){
+      const pool = PALETTES.filter(p=> !(p.ink===currentPalette.ink && p.paper===currentPalette.paper));
+      chosen = pool[Math.floor(Math.random()*pool.length)];
+    } else {
+      chosen = PALETTES.find(p=>p.name===key);
+    }
+    if(!chosen) return;
+    applyPalette(chosen);
+    // flash the chosen name
+    flash.textContent = '→ ' + chosen.name;
+    flash.classList.remove('fade');
+    // force reflow so the transition restarts
+    void flash.offsetWidth;
+    flash.classList.add('fade');
+    // hide strip
+    opts.classList.add('hidden');
+  });
+}
+// Apply once more in case persistence loaded a custom value, and wire up bar.
+applyPalette(currentPalette);
+setupThemeBar();
+
+// ---------- helpers ----------
+const $ = (s, r=document)=>r.querySelector(s);
+const $$ = (s, r=document)=>[...r.querySelectorAll(s)];
+const pad3 = n => String(n).padStart(3,'0');
+
+// ---------- URL detection (mock) ----------
+const URL_STATUS = $('#url-status');
+function detectURL(u){
+  u = u.trim();
+  if(!u) return {kind:'empty'};
+  try{
+    const url = new URL(u);
+    const h = url.hostname.replace(/^www\./,'');
+    if(h.includes('open.spotify') || h === 'spotify.com'){
+      // Pretend spotify creds missing 30% of cases? No — deterministic on path.
+      if(url.pathname.includes('/playlist/')) return {kind:'sp-pl', label:'Spotify playlist: "get right!" — 184 tracks'};
+      if(url.pathname.includes('/track/')) return {kind:'sp-tr', label:'Spotify track: Mall Grab — Breathing'};
+      return {kind:'sp-tr', label:'Spotify track: Mall Grab — Breathing'};
+    }
+    if(h.includes('youtube') || h === 'youtu.be'){
+      if(url.searchParams.get('list')) return {kind:'yt-pl', label:'YouTube playlist: "DJ Set Bombs" — 47 tracks'};
+      return {kind:'yt-tr', label:'YouTube video: ROSÉ & Bruno Mars — APT.'};
+    }
+    if(h.includes('soundcloud')){
+      if(url.pathname.split('/').filter(Boolean).length >= 3) return {kind:'sc-tr', label:'SoundCloud track: Yung Lain — Sextrance Worldwide'};
+      return {kind:'sc-pl', label:'SoundCloud playlist: "afters" — 22 tracks'};
+    }
+    return {kind:'bad'};
+  } catch(e){
+    return {kind:'bad'};
+  }
+}
+
+const SPOTIFY_CONFIGURED = false;
+function setStatus(){
+  const u = $('#url').value;
+  const r = detectURL(u);
+  URL_STATUS.classList.remove('ok','err');
+  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; return; }
+  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; return; }
+  if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')){
+    URL_STATUS.classList.add('err');
+    URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
+    $('#status-settings').onclick = ()=> showSettings();
+    return;
+  }
+  URL_STATUS.classList.add('ok');
+  URL_STATUS.textContent = r.label;
+}
+$('#url').addEventListener('input', setStatus);
+setStatus();
+
+// ---------- checkboxes ----------
+$$('.checkbox').forEach(c=>{
+  c.addEventListener('click', ()=>{
+    const on = !c.classList.contains('on');
+    c.classList.toggle('on', on);
+    const txt = c.textContent.replace(/^\[.\]\s*/, '');
+    c.textContent = (on ? '[x] ' : '[ ] ') + txt;
+  });
+});
+
+// ---------- radios ----------
+$$('.radio-line').forEach(line=>{
+  line.addEventListener('click', e=>{
+    const r = e.target.closest('.radio'); if(!r) return;
+    $$('.radio', line).forEach(x=>{
+      x.classList.remove('on');
+      x.textContent = x.textContent.replace(/^\([^)]*\)/, '( )');
+    });
+    r.classList.add('on');
+    r.textContent = r.textContent.replace(/^\([^)]*\)/, '(•)');
+    sourceFilter = r.dataset.val;
+    renderLib();
+  });
+});
+
+// ---------- jobs (mock) ----------
+const JOBS = [
+  {
+    id:'j1', source:'Spotify', name:'"get right!"',
+    total:184, done:42, failed:3, etaSec:83,
+    current:'Mall Grab — Breathing',
+    paused:false,
+    logOpen:false,
+    log: [
+      'AshZone — get right!',
+      '[YT] OK  analyzed  7A  136 BPM',
+      'Yazida — spite',
+      '[YT] OK  analyzed  7B  129 BPM',
+      'Technopagan — @@@@@LF>U',
+      '[YT] FAIL  no match',
+      '[SC] OK  analyzed  5A  168 BPM',
+      'Liquid Girls — i feel it',
+      '[YT] OK  analyzed  4A  152 BPM',
+    ],
+  },
+  {
+    id:'j2', source:'YouTube', name:'"DJ Set Bombs"',
+    total:47, done:5, failed:0, etaSec:212,
+    current:'rl1805 — nexus',
+    paused:false,
+    logOpen:false,
+    log: [
+      'Ilykimchi — obsessed',
+      '[YT] OK  analyzed  12A  140 BPM',
+      'DJ Planet Express — Fantasy Forever',
+      '[YT] OK  analyzed  8B  129 BPM',
+    ],
+  },
+];
+let jobsCollapsed = false;
+
+function bar(done,total,width=32){
+  const filled = Math.round((done/total) * width);
+  return '[' + '█'.repeat(filled) + '░'.repeat(width-filled) + '] ' + done + ' / ' + total + ' (' + Math.round((done/total)*100) + '%)';
+}
+function fmtETA(s){
+  if(s<=0) return '--';
+  const m = Math.floor(s/60), r = s%60;
+  return (m? m+'m ' : '') + r + 's';
+}
+
+function renderJobs(){
+  const box = $('#jobs-box');
+  const label = $('#jobs-label');
+  const body = $('#jobs-body');
+  const toggle = $('#jobs-toggle');
+
+  if(JOBS.length === 0){
+    label.textContent = '~~ ACTIVE JOBS (0) — paste a URL to start ~~';
+    body.classList.add('hidden');
+    toggle.classList.add('hidden');
+    return;
+  }
+  toggle.classList.remove('hidden');
+
+  if(jobsCollapsed){
+    const totalDone = JOBS.reduce((a,j)=>a+j.done,0);
+    const totalAll = JOBS.reduce((a,j)=>a+j.total,0);
+    const totalFail = JOBS.reduce((a,j)=>a+j.failed,0);
+    label.textContent = `~~ ACTIVE JOBS (${JOBS.length}) · ${totalDone}/${totalAll} tracks · ${totalFail} failed ~~`;
+    toggle.textContent = '[Expand]';
+    body.classList.add('hidden');
+    return;
+  }
+  label.textContent = `~~ ACTIVE JOBS (${JOBS.length}) ~~`;
+  toggle.textContent = '[Collapse]';
+  body.classList.remove('hidden');
+
+  body.innerHTML = JOBS.map(j => `
+    <div class="job" data-id="${j.id}">
+      <div class="job-head">
+        <span class="job-title">${j.source} · ${j.name}</span>
+        <span class="job-actions">
+          <button class="btn tiny" data-act="pause">[${j.paused?'▶':'||'}]</button>
+          <button class="btn tiny" data-act="cancel">[X]</button>
+          <button class="btn tiny" data-act="log">[Log]</button>
+        </span>
+      </div>
+      <div class="bar-line"><span class="bar">${bar(j.done,j.total)}</span></div>
+      <div class="job-meta">
+        <span>ETA: ${fmtETA(j.etaSec)}</span>
+        <span>Failed: ${j.failed}</span>
+        ${j.paused? '<span><b>[ paused ]</b></span>':''}
+      </div>
+      <div class="job-current">${j.current}<span class="blink">_</span></div>
+      ${j.logOpen ? `<pre class="log-pane">${j.log.join('\n')}</pre>` : ''}
+    </div>
+  `).join('');
+
+  $$('.job', body).forEach(el=>{
+    const id = el.dataset.id;
+    const job = JOBS.find(x=>x.id===id);
+    el.querySelector('[data-act="pause"]').addEventListener('click', ()=>{ job.paused = !job.paused; renderJobs(); });
+    el.querySelector('[data-act="cancel"]').addEventListener('click', ()=>{
+      const i = JOBS.findIndex(x=>x.id===id); JOBS.splice(i,1); renderJobs();
+    });
+    el.querySelector('[data-act="log"]').addEventListener('click', ()=>{ job.logOpen = !job.logOpen; renderJobs(); });
+  });
+}
+$('#jobs-toggle').addEventListener('click', ()=>{ jobsCollapsed = !jobsCollapsed; renderJobs(); });
+renderJobs();
+
+// fake progress disabled — real progress comes from the backend (see API integration block)
+
+// ---------- library data: bucket tree ----------
+// Bucket ranges (must mirror on-disk subfolders)
+const BUCKETS = [
+  {name:'75-84',   min:75,  max:84},
+  {name:'85-94',   min:85,  max:94},
+  {name:'95-104',  min:95,  max:104},
+  {name:'105-114', min:105, max:114},
+  {name:'115-125', min:115, max:125},
+  {name:'126-135', min:126, max:135},
+  {name:'136-145', min:136, max:145},
+  {name:'146-155', min:146, max:155},
+  {name:'156-165', min:156, max:165},
+  {name:'166-175', min:166, max:175},
+  {name:'176-185', min:176, max:185},
+  {name:'196-205', min:196, max:205},
+  {name:'unknown-bpm', min:null, max:null},
+];
+function bucketFor(bpm){
+  if(bpm == null) return 'unknown-bpm';
+  for(const b of BUCKETS){
+    if(b.min!=null && bpm>=b.min && bpm<=b.max) return b.name;
+  }
+  return 'unknown-bpm';
+}
+function bucketDef(name){ return BUCKETS.find(b=>b.name===name); }
+
+// ~80 tracks spread across buckets, several with 4+
+let TRACK_ID = 1;
+function T(cam,bpm,artist,title,source){
+  return {id:'t'+(TRACK_ID++), cam, key:CAM_TO_KEY[cam]||'', bpm, artist, title, source, bucket:bucketFor(bpm)};
+}
+const CAM_TO_KEY = {
+  '1A':'G#m','1B':'B','2A':'D#m','2B':'F#','3A':'A#m','3B':'C#',
+  '4A':'Fm','4B':'G#','5A':'Cm','5B':'D#','6A':'Gm','6B':'A#',
+  '7A':'Dm','7B':'F','8A':'Am','8B':'C','9A':'Em','9B':'G',
+  '10A':'Bm','10B':'D','11A':'F#m','11B':'A','12A':'C#m','12B':'E',
+};
+const LIB = [
+  // 75-84 (3)
+  T('5B',78,'wet pavement','sundayafterglow','SC'),
+  T('8A',80,'cassette saint','holding pattern','YT'),
+  T('11A',83,'lukewarm.','envelope filter','SC'),
+  // 85-94 (5)
+  T('11A',89,'latex fruit','#m4gicfeel','YT'),
+  T('2A',92,'thalassa','low tide rmx','SC'),
+  T('7A',86,'rl1805','nexus (instr)','YT'),
+  T('4B',88,'oceanside','liminal lobby','SC'),
+  T('9B',91,'driftwood saint','telephone weather','YT'),
+  // 95-104 (4)
+  T('9B',97,'lo-fi pyramid','dust mite','YT'),
+  T('10B',104,'beep merchant','candy paint','YT'),
+  T('11A',98,'kid karaoke','blue room','YT'),
+  T('3A',101,'tape deity','september bedroom','SC'),
+  // 105-114 (2)
+  T('5A',108,'mall ghost','escalator weep','SC'),
+  T('7B',112,'no fax','dialup elegy','YT'),
+  // 115-125 (4)
+  T('3B',124,'glassbreaker','soft static','SC'),
+  T('4B',122,'oceanside','liminal lobby II','SC'),
+  T('6A',119,'plus one','knot of fog','YT'),
+  T('8B',125,'drumcat','overture in beige','YT'),
+  // 126-135 (5)
+  T('7B',129,'Yazida','spite','YT'),
+  T('8B',129,'DJ Planet Express','Fantasy Forever','YT'),
+  T('10A',128,'midnight subroutine','garage prayer','YT'),
+  T('2B',132,'velouria','frostbite teen','SC'),
+  T('1A',135,'pricetag','unsent voicenote','YT'),
+  // 136-145 (4)
+  T('7A',136,'AshZone','get right!','YT'),
+  T('12A',140,'Ilykimchi','obsessed','SC'),
+  T('1B',144,'kawaii hooligan','lemonade riot','SC'),
+  T('5B',138,'cubic kid','rinse repeat','YT'),
+  // 146-155 (3)
+  T('4A',152,'Liquid Girls','i feel it','YT'),
+  T('12B',150,'static garden','vapors over the canal','YT'),
+  T('9A',148,'mossbeam','tower static','SC'),
+  // 156-165 (4)
+  T('11B',161,'Lady Gaga, Bruno Mars','Die With A Smile','YT'),
+  T('9A',161,'Yung Lain','Sextrance Worldwide','YT'),
+  T('3A',158,'phantom limb fm','bedroom rave','YT'),
+  T('6B',164,'jpeg ghost','rave pamphlet','SC'),
+  // 166-175 (5)
+  T('5A',168,'Technopagan','@@@@@LF>U','SC'),
+  T('8A',172,'rl1805','nexus','YT'),
+  T('6B',174,'crrush.exe','witchhour','YT'),
+  T('2A',170,'angelpilot','hard wire','YT'),
+  T('11A',167,'noctilux','runway flicker','SC'),
+  // 176-185 (4)
+  T('5A',185,'Nfract','Phantasia 2000','SC'),
+  T('1A',185,'mint','time keeps flying by','SC'),
+  T('6A',176,'k!ssOFF','pixie dust dnb','YT'),
+  T('10B',180,'goldenpalm','arcade sermon','YT'),
+  // 196-205 (2)
+  T('12A',198,'speedcat','overdriver','YT'),
+  T('4B',202,'rave dad','meltdown county','SC'),
+  // unknown-bpm (0) — leave empty
+];
+// Re-bucket the synthetic ones whose bpm crossed boundaries above
+LIB.forEach(t=> t.bucket = bucketFor(t.bpm));
+
+let sourceFilter = 'all';
+let selected = new Set();      // track ids
+let expandedTrack = new Set(); // track ids → edit form open
+let expandedBucket = new Set();// bucket names
+
+// Normalize either Camelot ('8A') or musical ('Am') input into the canonical Camelot value.
+const KEY_TO_CAM = (function(){
+  const m = {};
+  for(const c in CAM_TO_KEY) m[CAM_TO_KEY[c].toUpperCase()] = c;
+  return m;
+})();
+function normalizeKeyInput(raw){
+  if(!raw) return '';
+  const v = raw.trim().toUpperCase();
+  if(/^\d{1,2}[AB]$/.test(v)) return v;            // already Camelot
+  if(KEY_TO_CAM[v]) return KEY_TO_CAM[v];          // musical → Camelot
+  return null;                                      // invalid
+}
+function passesFilters(t){
+  const q = $('#f-search').value.trim().toLowerCase();
+  const bMin = parseInt($('#f-bpm-min').value,10);
+  const bMax = parseInt($('#f-bpm-max').value,10);
+  const camLive = normalizeKeyInput($('#f-cam').value);
+  if(q && !((t.artist+' '+t.title).toLowerCase().includes(q))) return false;
+  if(sourceFilter!=='all' && t.source!==sourceFilter) return false;
+  if(!isNaN(bMin) && t.bpm < bMin) return false;
+  if(!isNaN(bMax) && t.bpm > bMax) return false;
+  // Camelot: chips OR-match. live input also counts (so users can type a single value without pressing Enter).
+  const camSet = new Set(camChips);
+  if(camLive) camSet.add(camLive);
+  if(camSet.size && !camSet.has(t.cam)) return false;
+  return true;
+}
+function filtersActive(){
+  return ($('#f-search').value.trim() ||
+          !isNaN(parseInt($('#f-bpm-min').value,10)) ||
+          !isNaN(parseInt($('#f-bpm-max').value,10)) ||
+          $('#f-cam').value.trim() ||
+          camChips.length ||
+          sourceFilter!=='all');
+}
+
+function padR(s,n){ s = String(s); return s.length>=n ? s.slice(0,n) : s + ' '.repeat(n-s.length); }
+function padL(s,n){ s = String(s); return s.length>=n ? s.slice(0,n) : ' '.repeat(n-s.length) + s; }
+
+function renderLib(){
+  const tree = $('#tree');
+  const empty = $('#lib-empty');
+
+  if(LIB.length===0){
+    tree.innerHTML='';
+    empty.classList.remove('hidden');
+    $('#lib-label').textContent = '~~ LIBRARY (0 TRACKS) ~~';
+    $('#selbar').classList.add('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  const totalShown = LIB.filter(passesFilters).length;
+  $('#lib-label').textContent = `~~ LIBRARY (${LIB.length.toLocaleString()} TRACKS${filtersActive()? ' · '+totalShown+' SHOWN':''}) ~~`;
+
+  // group
+  const byBucket = {};
+  for(const b of BUCKETS) byBucket[b.name] = [];
+  for(const t of LIB) byBucket[t.bucket].push(t);
+  // sort tracks within bucket by camKey
+  const camKey = c => { const m=/^(\d{1,2})([AB])$/.exec(c); return m? parseInt(m[1],10)*2+(m[2]==='A'?0:1) : 99; };
+  for(const k in byBucket) byBucket[k].sort((a,b)=> camKey(a.cam)-camKey(b.cam) || a.bpm-b.bpm);
+
+  // auto-collapse buckets with zero matches when filters active
+  const filterOn = filtersActive();
+
+  let html = '';
+  for(const b of BUCKETS){
+    const all = byBucket[b.name];
+    const matched = all.filter(passesFilters);
+    const total = all.length;
+    const shown = matched.length;
+    const isEmpty = total === 0;
+    const filteredOut = filterOn && shown === 0 && total > 0;
+
+    let isOpen = expandedBucket.has(b.name);
+    if(filteredOut) isOpen = false; // auto-collapse
+
+    const bracket = isEmpty ? '[+]' : (isOpen ? '[-]' : '[+]');
+    const cls = ['bucket-row'];
+    if(isEmpty || filteredOut) cls.push('empty');
+
+    let countTxt;
+    if(filterOn && total>0) countTxt = `${shown} of ${total} tracks`;
+    else countTxt = `${total} track${total===1?'':'s'}`;
+
+    html += `<div class="${cls.join(' ')}" data-bucket="${b.name}">`
+          + `<span class="b-label">${bracket} ${b.name}/</span>`
+          + `<span class="b-count">${countTxt}</span>`
+          + `</div>`;
+
+    if(isOpen && !isEmpty){
+      const list = filterOn ? matched : all;
+      for(const t of list){
+        const sel = selected.has(t.id) ? ' sel' : '';
+        const mv = t.moved ? ' moved' : '';
+        const flag = t.moved ? '!!' : '  ';
+        html += `<div class="track-row${sel}${mv}" data-id="${t.id}">`
+              + `<span class="track-moved-flag">${flag}</span>`
+              + `<span class="track-indent" style="width:3ch"></span>`
+              + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
+              + `<span class="track-sep">·</span>`
+              + `<span class="track-bpm">${pad3(t.bpm)}</span>`
+              + `<span class="track-sep">·</span>`
+              + `<span class="track-artist">${escapeHtml(padR(t.artist,16))}</span>`
+              + `<span class="track-sep">·</span>`
+              + `<span class="track-title">${escapeHtml(t.title)}</span>`
+              + `<span class="track-source">[${t.source}]</span>`
+              + `</div>`;
+        if(expandedTrack.has(t.id)){
+          html += `<div class="track-edit" data-edit="${t.id}">`
+                + `<div class="edit-form">`
+                +   `<span class="lbl">Edit:</span>`
+                +   `<span class="lbl">BPM <input type="number" value="${t.bpm}" data-f="bpm"></span>`
+                +   `<span class="lbl">Camelot <input type="text" value="${t.cam}" maxlength="3" style="width:60px;text-transform:uppercase;" data-f="cam"></span>`
+                +   `<span class="lbl">Key <input type="text" value="${t.key}" maxlength="4" style="width:60px;" data-f="key"></span>`
+                +   `<button class="btn" data-act="save">[ Save ]</button>`
+                +   `<button class="btn" data-act="reanalyze">[ Re-analyze ]</button>`
+                +   `<button class="btn" data-act="open">[ Open in folder ]</button>`
+                +   `<button class="btn" data-act="delete">[ Delete ]</button>`
+                + `</div>`
+                + `</div>`;
+        }
+      }
+    }
+  }
+  tree.innerHTML = html;
+
+  // selection bar
+  if(selected.size>0){
+    $('#selbar').classList.remove('hidden');
+    $('#sel-count').textContent = `${selected.size} track${selected.size===1?'':'s'} selected`;
+  } else {
+    $('#selbar').classList.add('hidden');
+  }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---------- tree interactions ----------
+const tree = $('#tree');
+
+tree.addEventListener('mouseover', e=>{
+  const tRow = e.target.closest('.track-row');
+  if(!tRow) return;
+  const id = tRow.dataset.id;
+  const t = LIB.find(x=>x.id===id);
+  if(t && t.moved){
+    t.moved = false;
+    renderLib();
+  }
+});
+
+tree.addEventListener('click', e=>{
+  // click in edit form: do not propagate to row toggle
+  const editEl = e.target.closest('.track-edit');
+  if(editEl){
+    const id = editEl.dataset.edit;
+    const t = LIB.find(x=>x.id===id);
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if(act==='save'){
+      const newBpm = parseInt(editEl.querySelector('[data-f=bpm]').value,10);
+      const newCam = editEl.querySelector('[data-f=cam]').value.trim().toUpperCase();
+      const newKey = editEl.querySelector('[data-f=key]').value.trim();
+      if(!isNaN(newBpm)) t.bpm = newBpm;
+      if(/^\d{1,2}[AB]$/.test(newCam)) t.cam = newCam;
+      if(newKey) t.key = newKey;
+      t.bucket = bucketFor(t.bpm);
+      expandedBucket.add(t.bucket);
+      expandedTrack.delete(id);
+      renderLib();
+      // persist
+      if(window.API) window.API.patchTrack(id, {bpm:newBpm, camelot:newCam, key:newKey})
+        .catch(err => toast('save failed: ' + err.message));
+    } else if(act==='delete'){
+      const i = LIB.findIndex(x=>x.id===id); if(i>=0) LIB.splice(i,1);
+      expandedTrack.delete(id); selected.delete(id);
+      renderLib();
+      // persist
+      if(window.API) window.API.deleteTrack(id)
+        .catch(err => { toast('delete failed: ' + err.message); if(window.API) window.API.refreshLibrary(); });
+    } else if(act==='reanalyze'){
+      if(window.API) {
+        toast('re-analyzing "' + t.artist + ' — ' + t.title + '"...');
+        window.API.reanalyzeTrack(id)
+          .then(updated => { Object.assign(t, updated); t.bucket = bucketFor(t.bpm); renderLib(); toast('re-analyzed: ' + t.cam + ' · ' + t.bpm + ' BPM'); })
+          .catch(err => toast('re-analyze failed: ' + err.message));
+      }
+    } else if(act==='open'){
+      // browser can't open native folders; backend would need to expose this — skip for v1
+    }
+    return;
+  }
+
+  const bRow = e.target.closest('.bucket-row');
+  if(bRow){
+    if(bRow.classList.contains('empty')) return;
+    const name = bRow.dataset.bucket;
+    if(expandedBucket.has(name)) expandedBucket.delete(name);
+    else expandedBucket.add(name);
+    renderLib();
+    return;
+  }
+
+  const tRow = e.target.closest('.track-row');
+  if(tRow){
+    const id = tRow.dataset.id;
+    if(e.shiftKey || e.ctrlKey || e.metaKey){
+      if(selected.has(id)) selected.delete(id); else selected.add(id);
+    } else {
+      if(expandedTrack.has(id)) expandedTrack.delete(id); else expandedTrack.add(id);
+      if(!selected.has(id)) selected.add(id); else selected.delete(id);
+    }
+    renderLib();
+  }
+});
+
+// ---------- DRAG & DROP ----------
+let dragState = null;
+
+function startDrag(id, sx, sy){
+  const t = LIB.find(x=>x.id===id);
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost';
+  ghost.textContent = `${t.artist} — ${t.title}`;
+  document.body.appendChild(ghost);
+  ghost.style.left = sx+'px'; ghost.style.top = sy+'px';
+  dragState = { id, ghost, hoverBucket:null, started:false, sx, sy };
+}
+function moveDrag(x,y){
+  if(!dragState) return;
+  const g = dragState.ghost;
+  g.style.left = (x+12)+'px';
+  g.style.top  = (y+12)+'px';
+  // hover detection
+  const el = document.elementFromPoint(x,y);
+  const bRow = el && el.closest && el.closest('.bucket-row');
+  // clear all
+  $$('.bucket-row.drop-hover').forEach(b=>b.classList.remove('drop-hover'));
+  if(bRow && !bRow.classList.contains('empty')){
+    bRow.classList.add('drop-hover');
+    dragState.hoverBucket = bRow.dataset.bucket;
+  } else if(bRow && bRow.classList.contains('empty')){
+    // unknown-bpm IS a valid drop target — re-allow it
+    if(bRow.dataset.bucket === 'unknown-bpm'){
+      bRow.classList.add('drop-hover');
+      dragState.hoverBucket = 'unknown-bpm';
+    } else {
+      dragState.hoverBucket = null;
+    }
+  } else {
+    dragState.hoverBucket = null;
+  }
+}
+function endDrag(commit){
+  if(!dragState) return;
+  const { id, ghost, hoverBucket } = dragState;
+  ghost.remove();
+  $$('.bucket-row.drop-hover').forEach(b=>b.classList.remove('drop-hover'));
+  $$('.track-row.dragging').forEach(r=>r.classList.remove('dragging'));
+  const ds = dragState; dragState = null;
+
+  if(!commit || !hoverBucket) return;
+  const t = LIB.find(x=>x.id===id);
+  if(!t) return;
+  const from = t.bucket;
+  if(from === hoverBucket) return; // no-op
+
+  const oldBPM = t.bpm;
+  const def = bucketDef(hoverBucket);
+  let newBPM;
+  if(def && def.min!=null){
+    if(oldBPM*2 >= def.min && oldBPM*2 <= def.max) newBPM = oldBPM*2;
+    else if(Math.round(oldBPM/2) >= def.min && Math.round(oldBPM/2) <= def.max) newBPM = Math.round(oldBPM/2);
+    else newBPM = Math.round((def.min+def.max)/2);
+  } else {
+    newBPM = oldBPM; // moving to unknown-bpm preserves bpm
+  }
+  t.bpm = newBPM;
+  t.bucket = hoverBucket;
+  t.moved = true;
+  expandedBucket.add(hoverBucket);
+  renderLib();
+  toast(`moved "${t.artist} — ${t.title}" to ${hoverBucket}/ · BPM ${oldBPM} → ${newBPM}`);
+  // persist to backend
+  if(window.API) window.API.moveTrack(id, hoverBucket, newBPM).catch(err => {
+    toast('move failed: ' + err.message);
+    // revert local change
+    t.bpm = oldBPM; t.bucket = from; renderLib();
+  });
+}
+
+tree.addEventListener('mousedown', e=>{
+  if(e.button !== 0) return;
+  const tRow = e.target.closest('.track-row');
+  if(!tRow) return;
+  if(e.target.closest('.track-edit')) return;
+  const id = tRow.dataset.id;
+  const sx = e.clientX, sy = e.clientY;
+  let armed = true;
+  const onMove = ev=>{
+    if(!armed) return;
+    const dx = ev.clientX - sx, dy = ev.clientY - sy;
+    if(dx*dx + dy*dy < 16) return; // 4px threshold
+    armed = false;
+    tRow.classList.add('dragging');
+    startDrag(id, ev.clientX, ev.clientY);
+  };
+  const onMove2 = ev=>{
+    if(dragState) moveDrag(ev.clientX, ev.clientY);
+  };
+  const onUp = ev=>{
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mousemove', onMove2);
+    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('keydown', onKey);
+    if(dragState){
+      ev.preventDefault();
+      ev.stopPropagation();
+      endDrag(true);
+      // suppress the next click that would fire from this mouseup
+      const blocker = e2=>{ e2.stopPropagation(); e2.preventDefault(); window.removeEventListener('click', blocker, true); };
+      window.addEventListener('click', blocker, true);
+    }
+  };
+  const onKey = ev=>{
+    if(ev.key === 'Escape' && dragState){ endDrag(false); document.removeEventListener('mousemove', onMove); document.removeEventListener('mousemove', onMove2); document.removeEventListener('mouseup', onUp); document.removeEventListener('keydown', onKey); }
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mousemove', onMove2);
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('keydown', onKey);
+});
+
+// ---------- toast ----------
+let toastTimer = null;
+function toast(msg){
+  let el = $('#toast');
+  if(!el){ el = document.createElement('div'); el.id='toast'; el.className='toast'; document.body.appendChild(el); }
+  el.textContent = msg;
+  el.style.display = 'block';
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>{ el.style.display='none'; }, 3000);
+}
+
+// ---------- right-click context menu on bucket header ----------
+let ctxMenu = null;
+function closeCtx(){ if(ctxMenu){ ctxMenu.remove(); ctxMenu=null; document.removeEventListener('mousedown', onCtxOutside, true); } }
+function onCtxOutside(e){ if(ctxMenu && !ctxMenu.contains(e.target)) closeCtx(); }
+tree.addEventListener('contextmenu', e=>{
+  const bRow = e.target.closest('.bucket-row');
+  if(!bRow) return;
+  e.preventDefault();
+  closeCtx();
+  const name = bRow.dataset.bucket;
+  ctxMenu = document.createElement('div');
+  ctxMenu.className = 'ctx-menu';
+  const items = [
+    {label:'Open folder in Explorer', act:'open'},
+    {label:'Re-analyze all in bucket', act:'reanalyze'},
+    {label:'Collapse all',  act:'collapseAll', sep:true},
+    {label:'Expand all',    act:'expandAll'},
+  ];
+  ctxMenu.innerHTML = items.map(it=>`<div class="ctx-item${it.sep?' ctx-sep':''}" data-act="${it.act}">${it.label}</div>`).join('');
+  document.body.appendChild(ctxMenu);
+  // position
+  const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
+  let x = e.clientX, y = e.clientY;
+  if(x+w > window.innerWidth) x = window.innerWidth - w - 4;
+  if(y+h > window.innerHeight) y = window.innerHeight - h - 4;
+  ctxMenu.style.left = x+'px'; ctxMenu.style.top = y+'px';
+  ctxMenu.addEventListener('click', ev=>{
+    const it = ev.target.closest('.ctx-item'); if(!it) return;
+    const act = it.dataset.act;
+    if(act==='collapseAll') expandedBucket.clear();
+    if(act==='expandAll') BUCKETS.forEach(b=>{ if(b.min!=null && LIB.some(t=>t.bucket===b.name)) expandedBucket.add(b.name); });
+    closeCtx();
+    renderLib();
+  });
+  setTimeout(()=> document.addEventListener('mousedown', onCtxOutside, true), 0);
+});
+window.addEventListener('blur', closeCtx);
+window.addEventListener('keydown', e=>{ if(e.key==='Escape') closeCtx(); });
+
+// filter listeners
+['f-search','f-bpm-min','f-bpm-max','f-cam'].forEach(id=>{
+  $('#'+id).addEventListener('input', renderLib);
+});
+
+// Camelot chips: Enter to add, click [x] to remove
+const camChips = [];
+function renderCamChips(){
+  const wrap = $('#cam-chips');
+  wrap.innerHTML = camChips.map((c,i)=>
+    `<span class="cam-chip">${c}/${CAM_TO_KEY[c]||''}<span class="x" data-i="${i}">[x]</span></span>`
+  ).join('');
+}
+$('#cam-chips').addEventListener('click', e=>{
+  const x = e.target.closest('.x'); if(!x) return;
+  camChips.splice(parseInt(x.dataset.i,10),1);
+  renderCamChips();
+  renderLib();
+});
+$('#f-cam').addEventListener('keydown', e=>{
+  if(e.key === 'Enter'){
+    const cam = normalizeKeyInput(e.target.value);
+    if(cam && !camChips.includes(cam)){
+      camChips.push(cam);
+      renderCamChips();
+    }
+    e.target.value = '';
+    renderLib();
+  } else if(e.key === 'Backspace' && !e.target.value && camChips.length){
+    camChips.pop();
+    renderCamChips();
+    renderLib();
+  }
+});
+$('#f-reset').addEventListener('click', ()=>{
+  $('#f-search').value = '';
+  $('#f-bpm-min').value = '';
+  $('#f-bpm-max').value = '';
+  $('#f-cam').value = '';
+  camChips.length = 0;
+  renderCamChips();
+  // reset radio
+  $$('.radio', $('#f-source')).forEach((x,k)=>{
+    x.classList.toggle('on', k===0);
+    x.textContent = x.textContent.replace(/^\([^)]*\)/, k===0?'(•)':'( )');
+  });
+  sourceFilter = 'all';
+  renderLib();
+});
+
+renderLib();
+
+// ---------- views: main / settings ----------
+function showSettings(){
+  $('#main-view').classList.add('hidden');
+  $('#settings-view').classList.remove('hidden');
+  window.scrollTo(0,0);
+}
+function showMain(){
+  $('#settings-view').classList.add('hidden');
+  $('#main-view').classList.remove('hidden');
+  window.scrollTo(0,0);
+}
+$('#open-settings').addEventListener('click', showSettings);
+$('#back-main').addEventListener('click', showMain);
+$('#open-about').addEventListener('click', ()=>{
+  alert('TuneHoard v0.1\n\nLocal Spotify/YouTube/SoundCloud → MP3 with BPM + Camelot tags.\nSince 2026.');
+});
+
+// settings: show/hide secret
+$('#s-show').addEventListener('click', ()=>{
+  const el = $('#s-csec');
+  const showing = el.type === 'text';
+  el.type = showing ? 'password' : 'text';
+  $('#s-show').textContent = showing ? '[show]' : '[hide]';
+});
+
+// advanced toggle
+$('#adv-toggle').addEventListener('click', ()=>{
+  const b = $('#adv-body');
+  const open = b.classList.toggle('hidden');
+  $('#adv-toggle').textContent = open ? '[Expand]' : '[Collapse]';
+});
+
+// key-format radio
+let keyFormat = 'camelot';
+function renderKeyFmtExample(){
+  const prefix = keyFormat === 'camelot' ? '8A' : 'Am';
+  $('#keyfmt-example').textContent = `${prefix} - 128 - Mall Grab - Breathing.mp3`;
+}
+renderKeyFmtExample();
+$('#keyfmt-row').addEventListener('click', e=>{
+  const r = e.target.closest('.keyfmt'); if(!r) return;
+  const val = r.dataset.val;
+  if(val === keyFormat) return;
+  keyFormat = val;
+  $$('.keyfmt', $('#keyfmt-row')).forEach(x=>{
+    const on = x.dataset.val === keyFormat;
+    x.classList.toggle('on', on);
+    x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
+  });
+  renderKeyFmtExample();
+  $('#keyfmt-nudge').classList.remove('hidden');
+  if(window.API) window.API.patchSettings({key_format: keyFormat})
+    .catch(err => toast('settings save failed: ' + err.message));
+});
+
+// sources reorder
+$('#src-list').addEventListener('click', e=>{
+  const a = e.target.closest('a[data-dir]'); if(!a) return;
+  const li = a.closest('li');
+  const dir = a.dataset.dir;
+  if(dir === 'up' && li.previousElementSibling) li.parentNode.insertBefore(li, li.previousElementSibling);
+  if(dir === 'down' && li.nextElementSibling) li.parentNode.insertBefore(li.nextElementSibling, li);
+});
+
+// download button — submit a real job to the backend
+$('#dl-btn').addEventListener('click', async ()=>{
+  const u = $('#url').value.trim();
+  const r = detectURL(u);
+  if(r.kind==='empty' || r.kind==='bad') return;
+  if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')) return;
+  if(!window.API){ toast('API not available'); return; }
+  try{
+    const bucketByBpm = $('#cb-bucket')?.classList.contains('on') ?? true;
+    const fallback    = $('#cb-fallback')?.classList.contains('on') ?? true;
+    const skipExist   = $('#cb-skip')?.classList.contains('on') ?? true;
+    await window.API.startJob({
+      url: u,
+      sources: fallback ? ['youtube','soundcloud'] : ['youtube'],
+      bucket_by_bpm: bucketByBpm,
+      skip_existing: skipExist,
+      key_format: keyFormat,
+    });
+    $('#url').value = ''; setStatus();
+    jobsCollapsed = false;
+    if(window.API) window.API.refreshJobs();
+  } catch(err){
+    toast('failed to start job: ' + err.message);
+  }
+});
+
+// ---------- welcome modal ----------
+const WELCOME_KEY = 'tunehoard_seen_welcome';
+if(!localStorage.getItem(WELCOME_KEY)){
+  $('#welcome-overlay').classList.remove('hidden');
+}
+$('#w-continue').addEventListener('click', ()=>{
+  localStorage.setItem(WELCOME_KEY, '1');
+  $('#welcome-overlay').classList.add('hidden');
+});
+
+/* =================================================================
+   API integration — talks to the FastAPI server at the same origin.
+   Designed to coexist with the mock data above: on first paint the
+   user sees mock tracks for ~50ms, then real backend data takes over.
+   ================================================================= */
+(function(){
+  async function jfetch(url, opts){
+    const r = await fetch(url, {
+      headers: {'Content-Type': 'application/json'},
+      ...(opts || {}),
+    });
+    if(!r.ok){
+      let msg = r.status + ' ' + r.statusText;
+      try { const j = await r.json(); msg = j.detail || msg; } catch(e){}
+      throw new Error(msg);
+    }
+    if(r.status === 204) return null;
+    return r.json();
+  }
+
+  function srcFromUrl(u){
+    if(!u) return 'Unknown';
+    if(u.includes('spotify')) return 'Spotify';
+    if(u.includes('youtu')) return 'YouTube';
+    if(u.includes('soundcloud')) return 'SoundCloud';
+    return 'URL';
+  }
+
+  const API = {
+    async getLibrary(){ return jfetch('/api/library'); },
+    async refreshLibrary(){
+      try{
+        const tracks = await API.getLibrary();
+        LIB.length = 0;
+        for(const t of tracks){
+          if(!t.bucket) t.bucket = bucketFor(t.bpm);
+          LIB.push(t);
+        }
+        renderLib();
+      } catch(err){
+        console.error('refreshLibrary failed:', err);
+      }
+    },
+    async patchTrack(id, patch){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+    },
+    async deleteTrack(id){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}`, {method: 'DELETE'});
+    },
+    async moveTrack(id, toBucket, newBPM){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}/move`, {
+        method: 'POST',
+        body: JSON.stringify({to_bucket: toBucket, new_bpm: newBPM}),
+      });
+    },
+    async reanalyzeTrack(id){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}/reanalyze`, {method: 'POST'});
+    },
+    async migrateKeys(keyFormat){
+      return jfetch('/api/migrate-keys', {
+        method: 'POST',
+        body: JSON.stringify({key_format: keyFormat}),
+      });
+    },
+    async getSettings(){ return jfetch('/api/settings'); },
+    async patchSettings(patch){
+      return jfetch('/api/settings', {method: 'PATCH', body: JSON.stringify(patch)});
+    },
+    async startJob(req){
+      return jfetch('/api/jobs', {method: 'POST', body: JSON.stringify(req)});
+    },
+    async listJobs(){ return jfetch('/api/jobs'); },
+    async refreshJobs(){
+      try{
+        const jobs = await API.listJobs();
+        // map server schema → renderJobs expectations
+        const mapped = jobs.map(j => ({
+          id: j.id,
+          source: srcFromUrl(j.url),
+          name: j.url ? '"' + j.url.slice(0, 60) + (j.url.length>60?'…':'') + '"' : '"job"',
+          total: j.total || 1,
+          done: j.done || 0,
+          failed: j.failed || 0,
+          etaSec: 0,
+          current: j.current || j.status || '',
+          paused: false,
+          logOpen: (JOBS.find(x=>x.id===j.id) || {}).logOpen || false,
+          log: j.log || [],
+          status: j.status,
+        }));
+        // preserve client-side state for known jobs
+        JOBS.length = 0;
+        JOBS.push(...mapped);
+        renderJobs();
+      } catch(err){
+        // server may not be running yet; ignore
+      }
+    },
+  };
+  window.API = API;
+
+  // Initial load: replace mock with real data
+  API.refreshLibrary();
+  API.refreshJobs();
+
+  // Poll jobs every 2s while the page is open
+  setInterval(() => API.refreshJobs(), 2000);
+  // Refresh library every 30s in case the backend changed it independently
+  setInterval(() => API.refreshLibrary(), 30000);
+
+  // Refresh after a started job completes (cheap heuristic: also refresh on focus)
+  window.addEventListener('focus', () => { API.refreshLibrary(); API.refreshJobs(); });
+
+  // Sync settings page from backend on first open
+  let settingsLoadedOnce = false;
+  const origShowSettings = window.showSettings;
+  if(typeof origShowSettings === 'function'){
+    window.showSettings = async function(){
+      origShowSettings();
+      if(settingsLoadedOnce) return;
+      try{
+        const s = await API.getSettings();
+        if(s.output_dir && $('#s-out')) $('#s-out').value = s.output_dir;
+        if(s.spotify_client_id && $('#s-cid')) $('#s-cid').value = s.spotify_client_id;
+        // don't pre-fill the secret (it comes back masked from the server)
+        if(s.key_format && $$('.keyfmt').length){
+          $$('.keyfmt').forEach(x => {
+            const on = x.dataset.val === s.key_format;
+            x.classList.toggle('on', on);
+            x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
+          });
+          keyFormat = s.key_format;
+          if(typeof renderKeyFmtExample === 'function') renderKeyFmtExample();
+        }
+        settingsLoadedOnce = true;
+      } catch(err){
+        toast('settings load failed: ' + err.message);
+      }
+    };
+  }
+
+  // Persist Spotify creds + output dir on blur
+  ['s-out','s-cid','s-csec'].forEach(id => {
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.addEventListener('blur', async () => {
+      const patch = {};
+      if(id==='s-out') patch.output_dir = el.value;
+      if(id==='s-cid') patch.spotify_client_id = el.value;
+      if(id==='s-csec' && el.value && !/^\*+$/.test(el.value)) patch.spotify_client_secret = el.value;
+      if(Object.keys(patch).length === 0) return;
+      try { await API.patchSettings(patch); }
+      catch(err){ toast('settings save failed: ' + err.message); }
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

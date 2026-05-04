@@ -12,7 +12,9 @@ Repo: https://github.com/HighWalls/TuneHoard
 - **YouTube / SoundCloud** playlists / videos: each entry's URL is downloaded directly (no search). Artist/title is best-effort parsed from the video title — `"Artist - Title"` split, falling back to the uploader as artist. Less reliable metadata than Spotify.
 - **Single tracks** (any source): land in `<out>/singles/` so they accumulate together. The same `--skip-existing` dedup applies, so adding more singles incrementally won't re-download.
 
-## Run it
+## Two ways to run
+
+### CLI
 
 ```bash
 python main.py <url>
@@ -28,19 +30,31 @@ python main.py <url>
 
 `<url>` can be a playlist or single-track URL on Spotify, YouTube, or SoundCloud.
 
-`ffmpeg` must be on PATH (system install, not pip) and `pip install -r requirements.txt`. Spotify URLs additionally need `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` and a one-time browser OAuth authorization on first run (cached to `.spotify_cache`); YouTube / SoundCloud URLs need neither. The redirect URI registered in the Spotify dashboard must match the one in `spotify_client.py` (default `http://127.0.0.1:8888/callback`).
+### Dashboard
+
+```bash
+python server.py    # starts FastAPI at http://127.0.0.1:8765/, auto-opens browser
+```
+
+Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.html` runs against `server.py`'s API and reads / writes the same `index.csv` files the CLI uses. Settings live in `.tunehoard_settings.json` (gitignored). See `docs/ARCHITECTURE.md` § Dashboard for the API surface.
+
+### Setup (either path)
+
+`ffmpeg` must be on PATH (system install, not pip) and `pip install -r requirements.txt`. Spotify URLs additionally need `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` (CLI) or in the dashboard Settings page, plus a one-time browser OAuth authorization on first run (cached to `.spotify_cache`); YouTube / SoundCloud URLs need neither. The redirect URI registered in the Spotify dashboard must match the one in `spotify_client.py` (default `http://127.0.0.1:8888/callback`).
 
 ## File map
 
 | File | Responsibility |
 |---|---|
 | `main.py` | CLI, URL dispatch, orchestration, filename formatting, CSV export |
+| `server.py` | FastAPI dashboard server. Wraps every CLI helper as JSON endpoints; spawns `main.py` as a subprocess for download jobs. Settings persisted to `.tunehoard_settings.json`. |
+| `dashboard/tunehoard/tunehoard.html` | Single-file vanilla-JS dashboard. Booted by `server.py`. On load it replaces its built-in mock data with `/api/library` + `/api/jobs` and polls them. |
 | `spotify_client.py` | Spotify playlist or track URL → `list[Track]` via spotipy (OAuth user flow). Defines the `Track` dataclass; `get_playlist_tracks()` for playlists, `get_track()` for single tracks. |
 | `ytdlp_loader.py` | YouTube / SoundCloud playlist or single video URL → `list[Track]` via yt-dlp. Entries carry a `source_url` for direct download. Single-video URLs return folder name `"singles"`. |
 | `downloader.py` | yt-dlp wrapper with two modes: `download_url()` (direct) for YT/SC entries, `download_track()` (search) for Spotify-derived tracks. |
 | `analyzer.py` | librosa: BPM (beat tracker) + key (Krumhansl-Schmuckler on chroma) |
-| `camelot.py` | `(root, mode) → Camelot notation` lookup (e.g. `"A", "minor" → "8A"`) |
-| `tagger.py` | mutagen ID3 writer: `TBPM`, `TKEY` (Camelot), `TIT2/TPE1/TALB`, `COMM` |
+| `camelot.py` | `(root, mode) → Camelot notation` lookup (e.g. `"A", "minor" → "8A"`); `musical_key_short()` for ID3 TKEY musical form. |
+| `tagger.py` | mutagen ID3 writer: `TBPM`, `TKEY`, `TXXX:CAMELOT_KEY`, `TXXX:MUSICAL_KEY`, `TIT2/TPE1/TALB`, `COMM` |
 
 Dataflow: `URL dispatcher → list[Track] → download (direct for YT/SC, search for Spotify; youtube → soundcloud fallback) → librosa analyze → mutagen tag → atomic rename → atomic CSV + failures.txt`.
 

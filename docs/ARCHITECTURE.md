@@ -140,3 +140,69 @@ The architecture assumes one analysis per track. To add a fast-path + fallback (
 ### "Liked Songs" support
 
 OAuth already has the user token, so adding Liked Songs is a small change: accept a sentinel value (e.g., `--source liked` or pass `"liked"` as the playlist arg) and call `sp.current_user_saved_tracks()` instead of `sp.playlist_items()`. Add the `user-library-read` scope to the OAuth scopes string.
+
+## Dashboard server (`server.py`)
+
+FastAPI app that exposes the CLI's behavior over HTTP/JSON, plus serves the static dashboard HTML. Run with `python server.py` — listens on `127.0.0.1:8765`, auto-opens the browser, no Docker / build step.
+
+### Why FastAPI subprocess (not in-process) for jobs
+
+Download jobs spawn `main.py` as a child process via `subprocess.Popen`, parse stdout for progress lines, and serve the parsed status via `/api/jobs`. We do this instead of importing `main.main()` and calling it in-process because:
+
+- librosa + numba are imported lazily once per process and hold significant memory + GPU/CPU resources. Running multiple analysis pipelines concurrently in-process is fragile.
+- `main.py` writes to `index.csv` atomically and can be restarted/killed without leaving the server in a half-state.
+- Stdout-line parsing is a stable contract: `main.py`'s existing log lines (`→ Artist - Title`, `Done. N/M tracks. ...`) double as a progress protocol. No need for a side-channel.
+
+### Endpoint surface
+
+All endpoints live under `/api/`. Server-side helpers are imported from `main.py` directly — `_expected_filename`, `_find_disk_file`, `_existing_tkey_format`, `_key_prefix`, `bpm_bucket`, `safe_replace`, etc. — so dashboard mutations behave identically to a CLI run with `--bucket-by-bpm --skip-existing`.
+
+| Method + Path | Body / Response |
+|---|---|
+| `GET /api/settings` | Returns settings dict. `spotify_client_secret` is masked (`********`) so the client doesn't echo it back as a literal value. |
+| `PATCH /api/settings` | Partial update; client must omit (not echo) the masked secret. Persists to `.tunehoard_settings.json`. |
+| `GET /api/library` | Reads `<library_dir>/index.csv`, returns `[{id, cam, key, bpm, artist, title, source, bucket, file}]`. `key` field is the *short* musical form (`"Am"`), not the full `"A minor"`. |
+| `PATCH /api/tracks/{id}` | Body `{bpm?, camelot?, key?}`. Updates the row, retags ID3, renames + re-buckets the file using existing `main.py` helpers. Atomic CSV write afterwards. |
+| `DELETE /api/tracks/{id}` | Removes the MP3 from disk + the row from the CSV. |
+| `POST /api/tracks/{id}/move` | Body `{to_bucket, new_bpm?}`. Drag-drop endpoint. If `new_bpm` is omitted, the server applies the same auto-pick rules as the dashboard's drag handler (half-time → double, double-time → half, else bucket midpoint). |
+| `POST /api/tracks/{id}/reanalyze` | Re-runs `analyzer.analyze()` on the file, updates row, retags. Preserves the file's existing TKEY format (Camelot vs musical) — does not migrate. |
+| `POST /api/migrate-keys` | Body `{key_format}`. Bulk: rewrites every file's TKEY + filename prefix to the requested format. Persists `key_format` as the new default in settings. |
+| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess. Returns the new job's id + initial state. |
+| `GET /api/jobs` | All jobs. `log` is truncated to last 3 lines per entry (full log via `/api/jobs/{id}/log`). |
+| `GET /api/jobs/{id}` / `GET /api/jobs/{id}/log` | Full single-job state / full log tail (default 100 lines, override with `?tail=N`). |
+| `GET /` | Serves `dashboard/tunehoard/tunehoard.html`. |
+| `GET /static/*` | Anything else under `dashboard/tunehoard/` (e.g., user-uploaded MP3s for failed-track manual recovery). |
+
+### Settings model
+
+`load_settings()` merges `DEFAULT_SETTINGS` with the contents of `.tunehoard_settings.json` (gitignored). `save_settings()` writes atomically (`.json.tmp` then `replace()`). Every endpoint that mutates state calls `load_settings()` fresh — there's no in-memory settings cache. Cheap and avoids the "stale config" class of bugs.
+
+`library_dir` points to a single playlist directory (containing `index.csv`). For multi-playlist support later, the schema is the same — we'd just walk the parent and merge multiple CSVs, tagging each row with its source playlist. Not done yet.
+
+## Dashboard (`dashboard/tunehoard/tunehoard.html`)
+
+Single self-contained HTML file (no build step, no bundler). Pure black-on-white aesthetic by default, palette switcher in the top-left toggles between three presets + a curated random palette pool. All CSS uses `--ink` / `--paper` custom properties; switching palettes is a one-line variable swap.
+
+### Mock-on-boot pattern
+
+The HTML ships with realistic mock data for `LIB` and `JOBS` so it renders standalone (developing the dashboard without the server is straightforward — just open the file in a browser). When `server.py` is running, the API integration block at the bottom of the script:
+
+1. Defines a global `window.API` with helpers for every endpoint.
+2. Calls `API.refreshLibrary()` and `API.refreshJobs()` immediately on load — these mutate the existing `LIB` and `JOBS` arrays in place via `array.length = 0; array.push(...newItems)`.
+3. Polls `/api/jobs` every 2 seconds and `/api/library` every 30 seconds.
+4. Refreshes both on `window.focus`.
+
+The user briefly sees mock data on first paint (~50 ms) before real data takes over. Don't try to "fix" this by deleting the mock — empty render flicker is worse UX than a brief flash of placeholder rows. If you need the dashboard to start truly empty, set `LIB = []` and `JOBS = []` at the top of the script.
+
+### Action wiring
+
+Each interactive control fires a backend call after the local UI update succeeds (optimistic-update pattern). On backend failure, a `toast()` shows the error and the local state is rolled back where reasonable:
+
+- **Drag-drop** → `POST /api/tracks/{id}/move`. On failure, the track is restored to its source bucket and the BPM reverted.
+- **Edit form Save** → `PATCH /api/tracks/{id}`.
+- **Edit form Re-analyze** → `POST /api/tracks/{id}/reanalyze`. Updates the row in-place from the response.
+- **Edit form Delete** → `DELETE /api/tracks/{id}`. Triggers a library refresh on failure to resync.
+- **Download button** → `POST /api/jobs` with the toggle-pill values (bucket / fallback / skip-existing).
+- **Key-format radio** → `PATCH /api/settings`.
+- **Settings field blur** (`#s-out`, `#s-cid`, `#s-csec`) → `PATCH /api/settings`. Field for the secret is skipped if its value is just asterisks (the masked placeholder from the server).
+- **"Open in folder"** is intentionally a no-op — browsers can't launch a native file explorer. Fixing this requires wrapping with pywebview (separate task).

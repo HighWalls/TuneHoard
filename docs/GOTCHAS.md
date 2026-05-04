@@ -22,6 +22,30 @@ On Windows: `winget install Gyan.FFmpeg`, then restart the terminal so PATH pick
 
 `pip install ffmpeg-python` does NOT install the binary — it's just a Python wrapper that still requires the native ffmpeg. Do not add it to requirements.txt.
 
+## OpenBLAS thread-pool race on Windows (server only)
+
+`server.py` runs `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1` before any heavy import. Without this, importing `librosa` (which transitively pulls in numpy + numba + OpenBLAS) at module import time triggers a thread-pool race on Windows:
+
+```
+OpenBLAS error: Memory allocation still failed after 10 retries, giving up.
+```
+
+The CLI `main.py` doesn't hit this because by the time librosa imports, the Python process has finished other startup; uvicorn's process model and thread pool are different and more aggressive. The two-line `os.environ.setdefault()` block at the top of `server.py` (before any other imports) is load-bearing — keep it there. If you ever add a worker pool or split the server into multiple processes, set both env vars in the parent shell before launching, or do it in the new entry point's first lines.
+
+`from __future__ import annotations` was removed from `server.py` because future imports must be the first statement after the docstring — and we need the env-var setup to come *before* any heavy import. We're on Python 3.13 in dev so `int | None` and `dict[str, Any]` work natively without the future import. If you ever target older Python, restructure as: docstring → future import → env setup → other imports.
+
+## Settings file is per-user, gitignored
+
+`.tunehoard_settings.json` lives in the project root and holds `library_dir`, `output_dir`, `spotify_client_id`, `spotify_client_secret`, key format, and a few advanced values. It's in `.gitignore`. **The Spotify client secret is returned masked** (`********`) from `GET /api/settings`. The dashboard knows not to re-send the masked value — its `s-csec` blur handler skips PATCH if the field value is just asterisks. If you add a new endpoint or field that surfaces the secret, preserve this masking.
+
+`save_settings()` writes atomically (`.json.tmp` then `replace()`). The same atomic-write discipline applies as for `index.csv` — a crash mid-write can never corrupt the existing settings.
+
+## Dashboard mock-on-boot is intentional
+
+`dashboard/tunehoard/tunehoard.html` ships with seed data hardcoded into `const LIB = [...]` and `const JOBS = [...]`. This is deliberate so the file renders standalone in a plain browser (no server) for design iteration. When `server.py` is the host, the API integration block at the bottom of the script overwrites both arrays in-place (`LIB.length = 0; LIB.push(...realData)`) within ~50 ms of page load.
+
+The user sees mock rows briefly before real data takes over. Don't try to "fix" this by removing the seed — empty-tree-then-pop-in is a worse first-paint than placeholder-then-real. If you genuinely need an empty start, gate the seed behind a flag, don't delete it.
+
 ## Windows stdout defaults to cp1252
 
 Windows Python opens `sys.stdout` with the system codepage (cp1252 for most installs), which can't encode most unicode track titles or even the `→` character used in progress output. `main.py` reconfigures both `stdout` and `stderr` to UTF-8 at import time. Do not remove this — it is the *only* reason the script doesn't crash on playlists with non-ASCII artist names. If you see a `UnicodeEncodeError` during printing, confirm that reconfigure block is still present.

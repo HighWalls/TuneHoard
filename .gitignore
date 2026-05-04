@@ -3,6 +3,16 @@
 .spotify_cache
 .cache
 
+# Server-side user state — paths, optional Spotify creds
+.tunehoard_settings.json
+.tunehoard_settings.json.tmp
+
+# Dashboard upload area (user-supplied MP3s for failed tracks)
+dashboard/tunehoard/uploads/
+
+# Claude Design export bundles (we keep the unzipped HTML, not the zip)
+dashboard/*.zip
+
 # Claude Code session state (contains local paths, username)
 .claude/
 
