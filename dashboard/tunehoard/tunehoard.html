@@ -632,12 +632,20 @@ hr.tilde::before{
       </div>
       <div class="tbl-wrap" id="tbl-wrap">
         <div class="tree" id="tree"></div>
-        <div id="lib-empty" class="hidden">
-          <pre class="empty-art">         +-----------------------+
-         |  no tracks yet        |
-         |  paste a URL above    |
-         |  to start             |
-         +-----------------------+</pre>
+        <div id="lib-empty" class="hidden" style="text-align:center; padding:20px 0;">
+          <pre class="empty-art" style="display:inline-block; text-align:left; margin:0;">+-----------------------+
+|  no tracks yet        |
+|  paste a URL above    |
+|  to start             |
+|                       |
+|  -- or --             |
+|                       |
+|  scan the folder for  |
+|  existing MP3s        |
++-----------------------+</pre>
+          <div style="margin-top:8px;">
+            <button class="btn" id="lib-scan-btn">[ Scan folder for existing MP3s ]</button>
+          </div>
         </div>
       </div>
     </div>
@@ -645,9 +653,9 @@ hr.tilde::before{
     <div class="selbar hidden" id="selbar">
       <span id="sel-count">0 tracks selected</span>
       <div class="btn-row">
-        <button class="btn">[ Re-analyze ]</button>
-        <button class="btn">[ Delete ]</button>
-        <button class="btn">[ Move to bucket ]</button>
+        <button class="btn" id="bulk-reanalyze">[ Re-analyze ]</button>
+        <button class="btn" id="bulk-delete">[ Delete ]</button>
+        <button class="btn" id="bulk-move">[ Move to bucket ]</button>
       </div>
     </div>
   </div>
@@ -671,8 +679,8 @@ hr.tilde::before{
   <div class="fset">
     <div class="inset-label">~~ OUTPUT FOLDER ~~</div>
     <div class="row">
-      <input id="s-out" class="path-input" type="text" value="C:\Users\HighWalls\Music\TuneHoard">
-      <button class="btn">[Browse...]</button>
+      <input id="s-out" class="path-input" type="text" value="">
+      <button class="btn" id="s-out-browse">[Browse...]</button>
     </div>
   </div>
 
@@ -691,24 +699,23 @@ hr.tilde::before{
     </div>
     <div class="row">
       <span class="label">Status:</span>
-      <span class="status-pill bad">NOT CONNECTED</span>
+      <span class="status-pill bad" id="s-status">NOT CONNECTED</span>
       <span style="flex:1;"></span>
-      <button class="btn">[ Authorize ]</button>
+      <button class="btn" id="s-auth">[ Authorize ]</button>
     </div>
   </div>
 
   <div class="fset">
     <div class="inset-label">~~ SOURCES (drag to reorder) ~~</div>
     <ul class="source-list" id="src-list">
-      <li><span>[YT]</span><span class="name">YouTube</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
-      <li><span>[SC]</span><span class="name">SoundCloud</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
-      <li><span>[SP]</span><span class="name">Spotify (re-find via YT/SC)</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
+      <li data-src="youtube"><span>[YT]</span><span class="name">YouTube</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
+      <li data-src="soundcloud"><span>[SC]</span><span class="name">SoundCloud</span><a class="tlink" data-dir="up">[↑]</a><a class="tlink" data-dir="down">[↓]</a></li>
     </ul>
   </div>
 
   <div class="fset">
     <div class="inset-label">~~ KEY FORMAT (TKEY tag + filename prefix) ~~</div>
-    <div style="margin-bottom:10px;">The on-screen library always shows both Camelot and musical notation.<br>This setting only changes what gets written to the ID3 TKEY tag and the leading chunk of each filename. Whichever you pick, the COMM tag still carries both formats so the file is portable.</div>
+    <div style="margin-bottom:10px;">The on-screen library always shows both Camelot and musical notation. This setting only changes what gets written to the ID3 TKEY tag and the leading chunk of each filename for <b>new downloads</b>. Existing files keep whatever format they were tagged with — use the button below to convert the whole library.<br><br>Whichever format you pick, the COMM tag still carries both forms so the file is portable across DJ software.</div>
     <div class="row" id="keyfmt-row" style="user-select:none;">
       <span class="radio keyfmt on" data-val="camelot">(•) Camelot &mdash; '8A'&nbsp;&nbsp; for Rekordbox</span>
       <span style="width:24px;"></span>
@@ -717,9 +724,9 @@ hr.tilde::before{
     <div class="row" style="margin-top:6px;">
       <span>Current filename example:&nbsp;&nbsp;<span id="keyfmt-example">8A - 128 - Mall Grab - Breathing.mp3</span></span>
     </div>
-    <div id="keyfmt-nudge" class="hidden" style="margin-top:10px; padding:6px 8px; border:1px solid var(--ink); background:var(--paper);">
-      <div>! Existing files will be renamed + retagged on the next sync.</div>
-      <div>&nbsp;&nbsp;Run with <span class="kbd">--bucket-by-bpm</span> to apply.</div>
+    <div class="row" style="margin-top:14px; align-items:center; gap:14px;">
+      <button class="btn" id="migrate-btn">[ Migrate existing library &gt;&gt; ]</button>
+      <span id="migrate-status" class="muted">retags every existing track to match the chosen format above</span>
     </div>
   </div>
 
@@ -740,8 +747,8 @@ hr.tilde::before{
       </div>
       <div class="row">
         <span class="label">ffmpeg path:</span>
-        <input type="text" class="path-input" value="C:\Program Files\ffmpeg\bin\ffmpeg.exe">
-        <button class="btn">[Browse...]</button>
+        <input type="text" class="path-input" id="s-ffmpeg" value="">
+        <button class="btn" id="s-ffmpeg-browse">[Browse...]</button>
       </div>
     </div>
   </div>
@@ -762,7 +769,7 @@ hr.tilde::before{
     <div>Choose where downloads should go:</div>
     <div class="field">
       <input id="w-out" type="text" placeholder="C:\Users\you\Music\TuneHoard">
-      <button class="btn">[Browse...]</button>
+      <button class="btn" id="w-out-browse">[Browse...]</button>
     </div>
     <div>Optional: set up Spotify support</div>
     <div class="muted">Skip if you only use YT / SoundCloud.</div>
@@ -893,21 +900,63 @@ function detectURL(u){
   }
 }
 
-const SPOTIFY_CONFIGURED = false;
+let SPOTIFY_CONFIGURED = false;
+fetch('/api/settings').then(r=>r.json()).then(s=>{
+  SPOTIFY_CONFIGURED = !!(s.spotify_client_id && s.spotify_client_secret);
+}).catch(()=>{});
+
+let _previewAbort = null;     // cancel stale fetches when user keeps typing
+let _previewTimer = null;     // debounce timer
+let _previewCurrent = '';     // last-fetched URL so we don't refetch identical input
+
 function setStatus(){
   const u = $('#url').value;
   const r = detectURL(u);
   URL_STATUS.classList.remove('ok','err');
-  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; return; }
-  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; return; }
+  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; return; }
+  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; _previewCurrent=''; return; }
   if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')){
     URL_STATUS.classList.add('err');
     URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
     $('#status-settings').onclick = ()=> showSettings();
+    _previewCurrent='';
     return;
   }
+  // Don't show any local placeholder; wait for the real title from backend.
   URL_STATUS.classList.add('ok');
-  URL_STATUS.textContent = r.label;
+  URL_STATUS.textContent = 'fetching…';
+  // Debounced backend preview
+  if(_previewTimer) clearTimeout(_previewTimer);
+  if(_previewAbort) _previewAbort.abort();
+  if(u === _previewCurrent) return;
+  _previewTimer = setTimeout(()=>{
+    _previewAbort = new AbortController();
+    const expected = u;
+    fetch('/api/preview?url=' + encodeURIComponent(u), { signal: _previewAbort.signal })
+      .then(res => res.json())
+      .then(j => {
+        // Only apply if the input hasn't changed since we fired
+        if($('#url').value !== expected) return;
+        URL_STATUS.classList.remove('ok','err');
+        if(j.kind === 'sp-unconfigured'){
+          URL_STATUS.classList.add('err');
+          URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
+          $('#status-settings').onclick = ()=> showSettings();
+        } else if(j.kind === 'unsupported' || j.kind === 'error'){
+          URL_STATUS.classList.add('err');
+          URL_STATUS.textContent = j.label;
+        } else {
+          URL_STATUS.classList.add('ok');
+          URL_STATUS.textContent = j.label;
+        }
+        _previewCurrent = expected;
+      })
+      .catch(err => {
+        if(err.name === 'AbortError') return;
+        URL_STATUS.classList.remove('ok'); URL_STATUS.classList.add('err');
+        URL_STATUS.textContent = 'preview failed: ' + err.message;
+      });
+  }, 450);
 }
 $('#url').addEventListener('input', setStatus);
 setStatus();
@@ -1015,7 +1064,6 @@ function renderJobs(){
       <div class="job-head">
         <span class="job-title">${j.source} · ${j.name}</span>
         <span class="job-actions">
-          <button class="btn tiny" data-act="pause">[${j.paused?'▶':'||'}]</button>
           <button class="btn tiny" data-act="cancel">[X]</button>
           <button class="btn tiny" data-act="log">[Log]</button>
         </span>
@@ -1024,7 +1072,6 @@ function renderJobs(){
       <div class="job-meta">
         <span>ETA: ${fmtETA(j.etaSec)}</span>
         <span>Failed: ${j.failed}</span>
-        ${j.paused? '<span><b>[ paused ]</b></span>':''}
       </div>
       <div class="job-current">${j.current}<span class="blink">_</span></div>
       ${j.logOpen ? `<pre class="log-pane">${j.log.join('\n')}</pre>` : ''}
@@ -1034,9 +1081,24 @@ function renderJobs(){
   $$('.job', body).forEach(el=>{
     const id = el.dataset.id;
     const job = JOBS.find(x=>x.id===id);
-    el.querySelector('[data-act="pause"]').addEventListener('click', ()=>{ job.paused = !job.paused; renderJobs(); });
-    el.querySelector('[data-act="cancel"]').addEventListener('click', ()=>{
-      const i = JOBS.findIndex(x=>x.id===id); JOBS.splice(i,1); renderJobs();
+    el.querySelector('[data-act="cancel"]').addEventListener('click', async ()=>{
+      // If the API is unavailable, fall back to the local-only splice.
+      if(!window.API){
+        const i = JOBS.findIndex(x=>x.id===id); if(i>=0) JOBS.splice(i,1);
+        renderJobs();
+        return;
+      }
+      try {
+        await window.API.cancelJob(id);
+        // Optimistic local removal so the user sees the job vanish immediately;
+        // the next refreshJobs poll will reaffirm it's gone server-side too.
+        const i = JOBS.findIndex(x=>x.id===id); if(i>=0) JOBS.splice(i,1);
+        renderJobs();
+        toast('job cancelled');
+        if(window.API.refreshJobs) window.API.refreshJobs();
+      } catch(err){
+        toast('cancel failed: ' + err.message);
+      }
     });
     el.querySelector('[data-act="log"]').addEventListener('click', ()=>{ job.logOpen = !job.logOpen; renderJobs(); });
   });
@@ -1221,6 +1283,8 @@ function renderLib(){
   let html = '';
   for(const b of BUCKETS){
     const all = byBucket[b.name];
+    // Hide empty buckets entirely — only render bands that contain tracks.
+    if(all.length === 0) continue;
     const matched = all.filter(passesFilters);
     const total = all.length;
     const shown = matched.length;
@@ -1341,7 +1405,10 @@ tree.addEventListener('click', e=>{
           .catch(err => toast('re-analyze failed: ' + err.message));
       }
     } else if(act==='open'){
-      // browser can't open native folders; backend would need to expose this — skip for v1
+      if(window.API){
+        window.API.openTrackFolder(id)
+          .catch(err => toast('open folder failed: ' + err.message));
+      }
     }
     return;
   }
@@ -1359,11 +1426,21 @@ tree.addEventListener('click', e=>{
   const tRow = e.target.closest('.track-row');
   if(tRow){
     const id = tRow.dataset.id;
+    // Mutually exclusive modes:
+    //   Plain click  → open edit form for THIS track only (closes any other
+    //                  open form, clears multi-selection).
+    //   Shift/Ctrl/Cmd-click → toggle multi-selection (closes any open
+    //                  edit form, never expands the row).
+    // This keeps the per-row edit form and the bulk-action bar from ever
+    // being on screen at the same time.
     if(e.shiftKey || e.ctrlKey || e.metaKey){
+      expandedTrack.clear();
       if(selected.has(id)) selected.delete(id); else selected.add(id);
     } else {
-      if(expandedTrack.has(id)) expandedTrack.delete(id); else expandedTrack.add(id);
-      if(!selected.has(id)) selected.add(id); else selected.delete(id);
+      selected.clear();
+      const wasOpen = expandedTrack.has(id);
+      expandedTrack.clear();
+      if(!wasOpen) expandedTrack.add(id);
     }
     renderLib();
   }
@@ -1488,6 +1565,79 @@ tree.addEventListener('mousedown', e=>{
 
 // ---------- toast ----------
 let toastTimer = null;
+// Vintage-NFO-styled replacement for native confirm() / alert().
+// showModal({title, body, ok, cancel, third}) → Promise<true | false | 'third'>
+//   - cancel=null → single-button (alert-style); always resolves true.
+//   - third=null  → two-button (confirm-style); resolves true|false.
+//   - third set   → three buttons left-to-right: cancel, third, ok.
+//   - Enter → OK (primary, rightmost). Esc → cancel.
+function showModal({title, body, ok='OK', cancel=null, third=null}){
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const box = document.createElement('div');
+    box.className = 'welcome';
+    box.style.maxWidth = '560px';
+    if(title){
+      const h = document.createElement('h2');
+      h.textContent = title;
+      box.appendChild(h);
+      const rule = document.createElement('div');
+      rule.className = 'rule';
+      rule.textContent = '~~~~~~~~~~~~~~~~~~~~~~~~~';
+      box.appendChild(rule);
+    }
+    if(body){
+      const bodyEl = document.createElement('div');
+      bodyEl.style.whiteSpace = 'pre-wrap';
+      bodyEl.style.marginBottom = '14px';
+      bodyEl.textContent = body;
+      box.appendChild(bodyEl);
+    }
+    const buttons = document.createElement('div');
+    buttons.style.display = 'flex';
+    buttons.style.gap = '10px';
+    buttons.style.justifyContent = 'center';
+    buttons.style.flexWrap = 'wrap';
+    if(cancel != null){
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn';
+      cancelBtn.textContent = `[ ${cancel} ]`;
+      cancelBtn.addEventListener('click', () => done(false));
+      buttons.appendChild(cancelBtn);
+    }
+    if(third != null){
+      const thirdBtn = document.createElement('button');
+      thirdBtn.className = 'btn';
+      thirdBtn.textContent = `[ ${third} ]`;
+      thirdBtn.addEventListener('click', () => done('third'));
+      buttons.appendChild(thirdBtn);
+    }
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn';
+    okBtn.textContent = `[ ${ok} ]`;
+    okBtn.addEventListener('click', () => done(true));
+    buttons.appendChild(okBtn);
+    box.appendChild(buttons);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    function done(value){
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+      resolve(value);
+    }
+    function onKey(e){
+      if(e.key === 'Escape' && cancel != null){ e.preventDefault(); done(false); }
+      else if(e.key === 'Enter'){ e.preventDefault(); done(true); }
+    }
+    document.addEventListener('keydown', onKey);
+    if(cancel != null){
+      overlay.addEventListener('click', e => { if(e.target === overlay) done(false); });
+    }
+    setTimeout(() => okBtn.focus(), 0);
+  });
+}
+
 function toast(msg){
   let el = $('#toast');
   if(!el){ el = document.createElement('div'); el.id='toast'; el.className='toast'; document.body.appendChild(el); }
@@ -1523,11 +1673,45 @@ tree.addEventListener('contextmenu', e=>{
   if(x+w > window.innerWidth) x = window.innerWidth - w - 4;
   if(y+h > window.innerHeight) y = window.innerHeight - h - 4;
   ctxMenu.style.left = x+'px'; ctxMenu.style.top = y+'px';
-  ctxMenu.addEventListener('click', ev=>{
+  ctxMenu.addEventListener('click', async ev=>{
     const it = ev.target.closest('.ctx-item'); if(!it) return;
     const act = it.dataset.act;
     if(act==='collapseAll') expandedBucket.clear();
     if(act==='expandAll') BUCKETS.forEach(b=>{ if(b.min!=null && LIB.some(t=>t.bucket===b.name)) expandedBucket.add(b.name); });
+    if(act==='open' && window.API){
+      window.API.openBucketFolder(name)
+        .catch(err => toast('open folder failed: ' + err.message));
+    }
+    if(act==='reanalyze' && window.API){
+      const ids = LIB.filter(t => t.bucket === name).map(t => t.id);
+      if(ids.length === 0){ toast(`bucket ${name}/ is empty`); }
+      else {
+        closeCtx();
+        const confirmed = await showModal({
+          title: 'Re-analyze bucket',
+          body: `Re-analyze all ${ids.length} tracks in ${name}/?\n\n~3s per track.`,
+          ok: 'Re-analyze',
+          cancel: 'Cancel',
+        });
+        if(confirmed){
+          renderLib();
+          (async ()=>{
+            let ok = 0, fail = 0;
+            toast(`reanalyze 0/${ids.length}…`);
+            for(let i = 0; i < ids.length; i++){
+              try { await window.API.reanalyzeTrack(ids[i]); ok++; }
+              catch(err){ fail++; }
+              if(i % 5 === 4 || i === ids.length - 1){
+                toast(`reanalyze ${i+1}/${ids.length}${fail ? ' · '+fail+' failed' : ''}`);
+              }
+            }
+            if(window.API.refreshLibrary) await window.API.refreshLibrary();
+            toast(`reanalyze done — ${ok} ok${fail ? ', '+fail+' failed' : ''}`);
+          })();
+          return;
+        }
+      }
+    }
     closeCtx();
     renderLib();
   });
@@ -1602,8 +1786,73 @@ function showMain(){
 $('#open-settings').addEventListener('click', showSettings);
 $('#back-main').addEventListener('click', showMain);
 $('#open-about').addEventListener('click', ()=>{
-  alert('TuneHoard v0.1\n\nLocal Spotify/YouTube/SoundCloud → MP3 with BPM + Camelot tags.\nSince 2026.');
+  showModal({
+    title: 'TUNEHOARD v0.1',
+    body: 'Local Spotify / YouTube / SoundCloud\n→ MP3 with BPM + Camelot tags.\n\nSince 2026.\ngithub.com/HighWalls/TuneHoard',
+    ok: 'Close',
+  });
 });
+
+// settings: native folder/file picker via /api/browse (tkinter)
+async function browseInto(inputEl, mode, title){
+  if(!window.API){ toast('API not ready'); return; }
+  try {
+    const r = await window.API.browse({mode, title, initial: inputEl.value});
+    if(r.path){
+      inputEl.value = r.path;
+      // Trigger blur so the existing field-blur handler PATCHes the new value.
+      inputEl.dispatchEvent(new Event('blur'));
+    }
+  } catch(err){
+    toast('browse failed: ' + err.message);
+  }
+}
+$('#s-out-browse')?.addEventListener('click', ()=>
+  browseInto($('#s-out'), 'directory', 'Choose output folder'));
+$('#s-ffmpeg-browse')?.addEventListener('click', ()=>
+  browseInto($('#s-ffmpeg'), 'file', 'Choose ffmpeg.exe'));
+$('#w-out-browse')?.addEventListener('click', ()=>
+  browseInto($('#w-out'), 'directory', 'Choose output folder'));
+
+// settings: Spotify status pill + Authorize flow
+async function refreshSpotifyStatus(){
+  const pill = $('#s-status');
+  if(!pill || !window.API) return;
+  try {
+    const s = await window.API.spotifyStatus();
+    if(s.authorized){
+      pill.textContent = 'CONNECTED';
+      pill.classList.remove('bad');
+    } else if(s.configured){
+      pill.textContent = 'NOT AUTHORIZED';
+      pill.classList.add('bad');
+    } else {
+      pill.textContent = 'NOT CONFIGURED';
+      pill.classList.add('bad');
+    }
+  } catch(e){}
+}
+$('#s-auth').addEventListener('click', async ()=>{
+  if(!window.API){ toast('API not ready'); return; }
+  const btn = $('#s-auth');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '[ Authorizing... ]';
+  toast('opening Spotify authorization in your browser…');
+  try {
+    const r = await window.API.spotifyAuthorize();
+    toast(`authorized as ${r.user}`);
+    SPOTIFY_CONFIGURED = true;
+    if(typeof setStatus === 'function') setStatus();
+    await refreshSpotifyStatus();
+  } catch(err){
+    toast('authorize failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+});
+refreshSpotifyStatus();
 
 // settings: show/hide secret
 $('#s-show').addEventListener('click', ()=>{
@@ -1638,19 +1887,233 @@ $('#keyfmt-row').addEventListener('click', e=>{
     x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
   });
   renderKeyFmtExample();
-  $('#keyfmt-nudge').classList.remove('hidden');
+  // Soft preference: persist to backend, do NOT touch existing files.
   if(window.API) window.API.patchSettings({key_format: keyFormat})
     .catch(err => toast('settings save failed: ' + err.message));
 });
 
-// sources reorder
+// Migrate button: explicit one-shot retag/rename of the entire library to
+// match the chosen format. Triggered manually only — the radio above never
+// fires this on its own.
+$('#migrate-btn').addEventListener('click', async ()=>{
+  if(!window.API){ toast('API not ready'); return; }
+  const fmtLabel = keyFormat === 'camelot' ? "Camelot ('8A')" : "Musical ('Am')";
+  const ok = await showModal({
+    title: 'Migrate library',
+    body:
+      `Retag every track in the library to ${fmtLabel} format?\n\n` +
+      `This rewrites the TKEY ID3 tag and renames filenames to match.\n` +
+      `BPM, Camelot, and key values are NOT changed — only the TKEY style.`,
+    ok: 'Migrate',
+    cancel: 'Cancel',
+  });
+  if(!ok) return;
+  const btn = $('#migrate-btn');
+  const status = $('#migrate-status');
+  btn.disabled = true;
+  btn.textContent = '[ Migrating... ]';
+  status.textContent = 'in progress…';
+  status.classList.remove('muted');
+  try {
+    const r = await window.API.migrateKeys(keyFormat);
+    status.textContent = `done — retagged ${r.retagged}, renamed ${r.renamed}`;
+    toast(`migration complete: retagged ${r.retagged}, renamed ${r.renamed}`);
+    if(window.API.refreshLibrary) await window.API.refreshLibrary();
+  } catch(err) {
+    status.textContent = 'failed: ' + err.message;
+    toast('migration failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '[ Migrate existing library >> ]';
+  }
+});
+
+// sources reorder — persists to backend on each click.
+function readSourceOrder(){
+  return [...$('#src-list').querySelectorAll('li[data-src]')].map(li => li.dataset.src);
+}
+function applySourceOrder(order){
+  if(!Array.isArray(order) || order.length < 2) return;
+  const list = $('#src-list');
+  if(!list) return;
+  const yt = list.querySelector('li[data-src="youtube"]');
+  const sc = list.querySelector('li[data-src="soundcloud"]');
+  if(!yt || !sc) return;
+  if(order.indexOf('soundcloud') < order.indexOf('youtube')){
+    // saved order: SC, YT — ensure SC is before YT in the DOM
+    if(sc.nextElementSibling !== yt) list.insertBefore(sc, yt);
+  } else {
+    if(yt.nextElementSibling !== sc) list.insertBefore(yt, sc);
+  }
+}
+
 $('#src-list').addEventListener('click', e=>{
   const a = e.target.closest('a[data-dir]'); if(!a) return;
   const li = a.closest('li');
   const dir = a.dataset.dir;
-  if(dir === 'up' && li.previousElementSibling) li.parentNode.insertBefore(li, li.previousElementSibling);
-  if(dir === 'down' && li.nextElementSibling) li.parentNode.insertBefore(li.nextElementSibling, li);
+  // Find the previous / next reorderable sibling (skip non-reorderable like SP).
+  if(dir === 'up'){
+    let prev = li.previousElementSibling;
+    while(prev && !prev.dataset.src) prev = prev.previousElementSibling;
+    if(prev) li.parentNode.insertBefore(li, prev);
+  } else if(dir === 'down'){
+    let next = li.nextElementSibling;
+    while(next && !next.dataset.src) next = next.nextElementSibling;
+    if(next) li.parentNode.insertBefore(next, li);
+  }
+  // Persist
+  const order = readSourceOrder();
+  if(window.API) window.API.patchSettings({sources: order})
+    .catch(err => toast('source order save failed: ' + err.message));
 });
+
+// Scan-folder button on the empty library state — builds an index.csv
+// from whatever MP3s already exist in library_dir. BPM/Camelot are left
+// blank by default; user can opt in to reading existing ID3 BPM/key tags
+// or run Re-analyze on selected tracks afterwards.
+$('#lib-scan-btn')?.addEventListener('click', async ()=>{
+  if(!window.API){ toast('API not ready'); return; }
+  const choice = await showModal({
+    title: 'Scan folder',
+    body:
+      'How should BPM and Camelot key be populated for each MP3?\n\n' +
+      'Read tags only — use BPM/key already written into the file.\n' +
+      'Tracks with no tags stay unlabeled (you can run Re-analyze\n' +
+      'on selected tracks later).\n\n' +
+      'Analyze missing — read existing tags AND run librosa\n' +
+      '(~3s per track) on tracks that have no BPM/key tag yet.',
+    cancel: 'Abort',
+    third: 'Read tags only',
+    ok: 'Analyze missing',
+  });
+  if(choice === false) return;  // user clicked Abort / pressed Esc
+  // OK = "Analyze missing", third = "Read tags only". Both options read tags;
+  // analyze_missing also runs librosa for unlabeled tracks.
+  const analyzeMissing = choice === true;
+  const btn = $('#lib-scan-btn');
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = '[ Scanning... ]';
+  try {
+    // Both modes read existing tags; analyzeMissing additionally runs librosa.
+    const r = await window.API.scanLibrary({
+      read_bpm_key: true,
+      analyze_missing: analyzeMissing,
+    });
+    const tail = analyzeMissing
+      ? ' · existing tags + librosa for unlabeled'
+      : ' · BPM/key from existing tags only';
+    const filledMsg = (r.filled || 0) > 0 ? ` · filled ${r.filled} blanks` : '';
+    let msg;
+    if(r.added > 0)         msg = `scan added ${r.added} new · ${r.kept} kept${filledMsg} · ${r.total} total${tail}`;
+    else if (r.filled > 0)  msg = `scan filled BPM/key on ${r.filled} previously-blank tracks · ${r.total} total`;
+    else                    msg = `scan: nothing new (${r.total} tracks already indexed)`;
+    toast(msg);
+    if(window.API.refreshLibrary) await window.API.refreshLibrary();
+  } catch(err){
+    toast('scan failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+});
+
+// ---------- bulk actions on selected tracks ----------
+async function runBulk(label, fn){
+  if(selected.size === 0) return;
+  if(!window.API){ toast('API not ready'); return; }
+  const ids = [...selected];
+  let ok = 0, fail = 0;
+  toast(`${label} 0/${ids.length}…`);
+  // Sequential — backend ops can be CPU-heavy (reanalyze) or filesystem-heavy.
+  for(let i = 0; i < ids.length; i++){
+    try { await fn(ids[i]); ok++; }
+    catch(err){ fail++; console.error(label, ids[i], err); }
+    if(i % 5 === 4 || i === ids.length - 1){
+      toast(`${label} ${i+1}/${ids.length}${fail ? ' · '+fail+' failed' : ''}`);
+    }
+  }
+  selected.clear();
+  if(window.API.refreshLibrary) await window.API.refreshLibrary();
+  toast(`${label} done — ${ok} ok${fail ? ', '+fail+' failed' : ''}`);
+}
+
+$('#bulk-reanalyze').addEventListener('click', async ()=>{
+  if(selected.size === 0) return;
+  const ok = await showModal({
+    title: 'Re-analyze tracks',
+    body: `Re-analyze ${selected.size} track${selected.size===1?'':'s'}?\n\nRuns librosa BPM/key detection on each (~3s/track).`,
+    ok: 'Re-analyze',
+    cancel: 'Cancel',
+  });
+  if(!ok) return;
+  runBulk('reanalyze', id => window.API.reanalyzeTrack(id));
+});
+
+$('#bulk-delete').addEventListener('click', async ()=>{
+  if(selected.size === 0) return;
+  const ok = await showModal({
+    title: 'Delete tracks',
+    body: `Delete ${selected.size} track${selected.size===1?'':'s'}?\n\nRemoves the MP3 files from disk and the rows from index.csv.\nThis cannot be undone.`,
+    ok: 'Delete',
+    cancel: 'Cancel',
+  });
+  if(!ok) return;
+  runBulk('delete', id => window.API.deleteTrack(id));
+});
+
+// Inline bucket picker — same vintage NFO styling as the right-click ctx-menu.
+let bucketPicker = null;
+function closeBucketPicker(){
+  if(bucketPicker){
+    bucketPicker.remove();
+    bucketPicker = null;
+    document.removeEventListener('mousedown', onPickerOutside, true);
+  }
+}
+function onPickerOutside(e){
+  if(bucketPicker && !bucketPicker.contains(e.target) && !e.target.closest('#bulk-move')){
+    closeBucketPicker();
+  }
+}
+
+$('#bulk-move').addEventListener('click', e=>{
+  if(selected.size === 0) return;
+  // Click again on the trigger while open → dismiss.
+  if(bucketPicker){ closeBucketPicker(); return; }
+
+  bucketPicker = document.createElement('div');
+  bucketPicker.className = 'ctx-menu';
+  bucketPicker.innerHTML =
+    `<div class="ctx-item ctx-sep" style="cursor:default;background:var(--ink);color:var(--paper);">move ${selected.size} track${selected.size===1?'':'s'} to:</div>` +
+    BUCKETS.map(b => `<div class="ctx-item" data-bucket="${b.name}">${b.name}/</div>`).join('');
+  document.body.appendChild(bucketPicker);
+
+  // Position above the button (or below if there isn't room above).
+  const btnRect = $('#bulk-move').getBoundingClientRect();
+  const pw = bucketPicker.offsetWidth, ph = bucketPicker.offsetHeight;
+  let x = btnRect.left;
+  let y = btnRect.top - ph - 4;
+  if(y < 4) y = btnRect.bottom + 4;
+  if(x + pw > window.innerWidth - 4) x = window.innerWidth - pw - 4;
+  if(x < 4) x = 4;
+  bucketPicker.style.left = x + 'px';
+  bucketPicker.style.top = y + 'px';
+
+  bucketPicker.addEventListener('click', ev=>{
+    const it = ev.target.closest('.ctx-item[data-bucket]');
+    if(!it) return;
+    const target = it.dataset.bucket;
+    closeBucketPicker();
+    runBulk(`move → ${target}/`, id => window.API.moveTrack(id, target, null));
+  });
+
+  // Defer outside-click attach so this same click doesn't immediately close it.
+  setTimeout(()=> document.addEventListener('mousedown', onPickerOutside, true), 0);
+});
+
+window.addEventListener('keydown', e=>{ if(e.key === 'Escape') closeBucketPicker(); });
+window.addEventListener('blur', closeBucketPicker);
 
 // download button — submit a real job to the backend
 $('#dl-btn').addEventListener('click', async ()=>{
@@ -1683,7 +2146,16 @@ const WELCOME_KEY = 'tunehoard_seen_welcome';
 if(!localStorage.getItem(WELCOME_KEY)){
   $('#welcome-overlay').classList.remove('hidden');
 }
-$('#w-continue').addEventListener('click', ()=>{
+$('#w-continue').addEventListener('click', async ()=>{
+  // Persist whatever the user typed/picked in the welcome card.
+  // Treat output_dir = library_dir so the library tree reflects the new folder.
+  const out = $('#w-out')?.value.trim();
+  if(out && window.API){
+    try { await window.API.patchSettings({library_dir: out}); }
+    catch(err){ toast('save failed: ' + err.message); return; }
+    if($('#s-out')) $('#s-out').value = out;
+    if(window.API.refreshLibrary) await window.API.refreshLibrary();
+  }
   localStorage.setItem(WELCOME_KEY, '1');
   $('#welcome-overlay').classList.add('hidden');
 });
@@ -1718,6 +2190,13 @@ $('#w-continue').addEventListener('click', ()=>{
 
   const API = {
     async getLibrary(){ return jfetch('/api/library'); },
+    async scanLibrary(opts){
+      const params = new URLSearchParams();
+      if(opts && opts.read_bpm_key) params.set('read_bpm_key', 'true');
+      if(opts && opts.analyze_missing) params.set('analyze_missing', 'true');
+      const qs = params.toString();
+      return jfetch('/api/library/scan' + (qs ? '?'+qs : ''), {method: 'POST'});
+    },
     async refreshLibrary(){
       try{
         const tracks = await API.getLibrary();
@@ -1762,6 +2241,22 @@ $('#w-continue').addEventListener('click', ()=>{
     async startJob(req){
       return jfetch('/api/jobs', {method: 'POST', body: JSON.stringify(req)});
     },
+    async cancelJob(id){
+      return jfetch(`/api/jobs/${encodeURIComponent(id)}`, {method: 'DELETE'});
+    },
+    async openTrackFolder(id){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}/open-folder`, {method: 'POST'});
+    },
+    async openBucketFolder(name){
+      return jfetch(`/api/buckets/${encodeURIComponent(name)}/open-folder`, {method: 'POST'});
+    },
+    async spotifyStatus(){ return jfetch('/api/spotify/status'); },
+    async spotifyAuthorize(){
+      return jfetch('/api/spotify/authorize', {method: 'POST'});
+    },
+    async browse(opts){
+      return jfetch('/api/browse', {method: 'POST', body: JSON.stringify(opts || {})});
+    },
     async listJobs(){ return jfetch('/api/jobs'); },
     async refreshJobs(){
       try{
@@ -1774,7 +2269,7 @@ $('#w-continue').addEventListener('click', ()=>{
           total: j.total || 1,
           done: j.done || 0,
           failed: j.failed || 0,
-          etaSec: 0,
+          etaSec: j.eta_sec || 0,
           current: j.current || j.status || '',
           paused: false,
           logOpen: (JOBS.find(x=>x.id===j.id) || {}).logOpen || false,
@@ -1804,45 +2299,66 @@ $('#w-continue').addEventListener('click', ()=>{
   // Refresh after a started job completes (cheap heuristic: also refresh on focus)
   window.addEventListener('focus', () => { API.refreshLibrary(); API.refreshJobs(); });
 
-  // Sync settings page from backend on first open
-  let settingsLoadedOnce = false;
-  const origShowSettings = window.showSettings;
-  if(typeof origShowSettings === 'function'){
-    window.showSettings = async function(){
-      origShowSettings();
-      if(settingsLoadedOnce) return;
-      try{
-        const s = await API.getSettings();
-        if(s.output_dir && $('#s-out')) $('#s-out').value = s.output_dir;
-        if(s.spotify_client_id && $('#s-cid')) $('#s-cid').value = s.spotify_client_id;
-        // don't pre-fill the secret (it comes back masked from the server)
-        if(s.key_format && $$('.keyfmt').length){
-          $$('.keyfmt').forEach(x => {
-            const on = x.dataset.val === s.key_format;
-            x.classList.toggle('on', on);
-            x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
-          });
-          keyFormat = s.key_format;
-          if(typeof renderKeyFmtExample === 'function') renderKeyFmtExample();
-        }
-        settingsLoadedOnce = true;
-      } catch(err){
-        toast('settings load failed: ' + err.message);
+  // Initial settings → DOM sync. Runs once at page load, regardless of
+  // whether the user has opened the Settings panel yet, because the panel
+  // is just hidden, not unrendered. (Earlier this was wrapped around
+  // showSettings, but function-declaration hoisting meant the click handler
+  // held a reference to the original showSettings — the wrapper never fired
+  // and saved settings never reapplied to the DOM after reload.)
+  (async function syncSettingsToDom(){
+    try{
+      const s = await API.getSettings();
+      if(s.library_dir && $('#s-out')) $('#s-out').value = s.library_dir;
+      if(s.ffmpeg_path && $('#s-ffmpeg')) $('#s-ffmpeg').value = s.ffmpeg_path;
+      if(s.spotify_client_id && $('#s-cid')) $('#s-cid').value = s.spotify_client_id;
+      // don't pre-fill the masked secret
+      if(s.key_format && $$('.keyfmt').length){
+        $$('.keyfmt').forEach(x => {
+          const on = x.dataset.val === s.key_format;
+          x.classList.toggle('on', on);
+          x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
+        });
+        keyFormat = s.key_format;
+        if(typeof renderKeyFmtExample === 'function') renderKeyFmtExample();
       }
-    };
-  }
+      if(Array.isArray(s.sources) && typeof applySourceOrder === 'function'){
+        applySourceOrder(s.sources);
+      }
+      // Re-evaluate Spotify-configured state and refresh URL status if needed.
+      const configured = !!(s.spotify_client_id && s.spotify_client_secret);
+      if(typeof SPOTIFY_CONFIGURED !== 'undefined' && SPOTIFY_CONFIGURED !== configured){
+        SPOTIFY_CONFIGURED = configured;
+        if(typeof setStatus === 'function') setStatus();
+      }
+    } catch(err){
+      console.warn('initial settings sync failed:', err);
+    }
+  })();
 
-  // Persist Spotify creds + output dir on blur
-  ['s-out','s-cid','s-csec'].forEach(id => {
+  // Persist settings fields on blur. The "Output Folder" field is treated as
+  // BOTH the download destination and the library root — they're conceptually
+  // the same thing for users, so we patch them together and refresh the
+  // library tree so the UI reflects the new folder's contents immediately.
+  ['s-out','s-ffmpeg','s-cid','s-csec'].forEach(id => {
     const el = document.getElementById(id);
     if(!el) return;
     el.addEventListener('blur', async () => {
       const patch = {};
-      if(id==='s-out') patch.output_dir = el.value;
+      if(id==='s-out') patch.library_dir = el.value;
+      if(id==='s-ffmpeg') patch.ffmpeg_path = el.value;
       if(id==='s-cid') patch.spotify_client_id = el.value;
       if(id==='s-csec' && el.value && !/^\*+$/.test(el.value)) patch.spotify_client_secret = el.value;
       if(Object.keys(patch).length === 0) return;
-      try { await API.patchSettings(patch); }
+      try {
+        await API.patchSettings(patch);
+        if(id==='s-cid' || id==='s-csec'){
+          if(typeof refreshSpotifyStatus === 'function') refreshSpotifyStatus();
+        }
+        if(id==='s-out' && API.refreshLibrary){
+          await API.refreshLibrary();
+          toast('library now showing ' + el.value);
+        }
+      }
       catch(err){ toast('settings save failed: ' + err.message); }
     });
   });

@@ -22,6 +22,56 @@ On Windows: `winget install Gyan.FFmpeg`, then restart the terminal so PATH pick
 
 `pip install ffmpeg-python` does NOT install the binary — it's just a Python wrapper that still requires the native ffmpeg. Do not add it to requirements.txt.
 
+## Killing a job means killing the whole process tree
+
+`server.py:_kill_process_tree` shells out to `taskkill /F /T /PID <pid>` on Windows rather than calling `proc.terminate()`. Reason: `main.py` spawns `yt-dlp`, which spawns `ffmpeg` for the mp3 postprocessor. Plain `proc.terminate()` ends only the direct Python child — `yt-dlp` and `ffmpeg` orphan to the OS and keep running until they finish their current task (which can take minutes). The `/T` flag walks the tree, `/F` forces termination.
+
+POSIX falls back to `terminate` then `kill` after 2s — most distros put child processes in the same process group by default, and `terminate` propagates.
+
+Verify cleanup after a cancel by checking `Get-Process ffmpeg,yt-dlp` — if those linger, the kill didn't take.
+
+The runner thread that's reading `proc.stdout` has a guard at `proc.wait()` exit: if `job["status"]` is already `"cancelled"` (set by the DELETE handler), it skips the usual "set to failed if exit code != 0" branch. Without that guard, a cancelled job would flip to "failed" status as soon as the killed subprocess exited, confusing the dashboard.
+
+## tkinter dialog runs from a uvicorn worker thread
+
+`POST /api/browse` invokes `tkinter.filedialog.askdirectory()` / `askopenfilename()`. Tkinter is famously single-threaded on macOS and tetchy elsewhere — but uvicorn dispatches sync FastAPI handlers to a thread pool *off* the asyncio event loop, so the dialog runs in a worker thread, not the main thread. On Windows this works fine. On macOS it will likely complain unless we move it to a subprocess or main-thread-runner pattern.
+
+The dialog blocks its worker thread for the duration of the picker (could be minutes if the user wanders off). Other endpoints stay responsive because uvicorn has a pool of workers. Don't try to "improve" this by making the handler `async def` and awaiting tk — there is no asyncio integration for tkinter and it'd just block the event loop hard.
+
+## `analyze_missing=true` blocks the request
+
+`POST /api/library/scan?analyze_missing=true` runs `analyzer.analyze()` synchronously in-process for every track that lacks a TBPM/TKEY tag. ~3 seconds per analyzed track. A folder with 200 unlabeled MP3s = ~10 minutes of HTTP request blocking. The dashboard sits on a "scanning…" toast the entire time.
+
+This is acceptable for a local one-shot tool — but if a user runs it on a huge library and gets impatient, they'll close the browser tab and the analysis keeps running server-side until completion. There's no progressive feedback. If this becomes a real problem, port the scan to the same subprocess-based job pattern that downloads use (`POST /api/jobs` style) so the dashboard can show streaming progress and Cancel kills it.
+
+## Smart-fill scan never overwrites existing values
+
+`/api/library/scan` is merge-safe in two directions:
+
+1. **Existing rows are kept**: re-running scan on an indexed folder doesn't clobber hand-edits. The merge keys on `file` (filename basename).
+2. **Blanks get filled, non-blanks don't**: if you scan with `read_bpm_key=true` after a previous Cancel scan, blank BPM/Camelot/key fields are populated from tags. Non-blank values (your hand-edits, prior tag reads) are preserved.
+
+This is intentional and load-bearing. Don't "simplify" by always overwriting from tags — users will lose work. The directionality is "fill gaps, never replace."
+
+Corollary: scanning never touches the MP3 files' actual ID3 tags. We only read them. Tag values written by Rekordbox / Mixed In Key / TuneHoard remain on disk regardless of which scan mode the user picks.
+
+## `output_dir` and `library_dir` were merged
+
+The settings model used to expose two path fields: `output_dir` (download root) and `library_dir` (which subfolder to read into the dashboard). They were almost always equal and the split confused users — picking a "new output folder" wouldn't change which folder the library tree displayed. Merged in May 2026 into a single `library_dir`.
+
+`load_settings()` migrates older configs on first read: if `library_dir` is empty/missing and `output_dir` is set, the value is folded in and `output_dir` is dropped. `save_settings()` strips `output_dir` on every write so it can never come back even if a new caller or ticked checkbox somehow passes one. The Pydantic `SettingsPatch` model also doesn't accept `output_dir` — passing it via `PATCH /api/settings` is silently ignored. Don't re-add the field — it's confusing without offering anything.
+
+## Function declaration hoisting + addEventListener = silent dead wrappers
+
+When wrapping a top-level `function foo(){}` later (`window.foo = async function(){...}`), any pre-existing `addEventListener('click', foo)` keeps its reference to the *original* lexical binding, not the reassigned `window.foo`. The wrapper effectively never fires.
+
+Hit this once in the dashboard's Settings-page sync — wrapped `showSettings` to load settings on first open, never noticed the wrapper wasn't running. Fix was to move the settings-fetch out of the wrapper and into a standalone `(async function syncSettingsToDom(){})()` IIFE that runs at script load time.
+
+When you need to inject behavior into a function that's already bound to event listeners, **don't reassign the global**. Either:
+1. Edit the original definition.
+2. Replace the bound listener with a new one that calls a wrapper.
+3. Run your code in a separate IIFE / handler that doesn't depend on the wrap firing.
+
 ## OpenBLAS thread-pool race on Windows (server only)
 
 `server.py` runs `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1` before any heavy import. Without this, importing `librosa` (which transitively pulls in numpy + numba + OpenBLAS) at module import time triggers a thread-pool race on Windows:

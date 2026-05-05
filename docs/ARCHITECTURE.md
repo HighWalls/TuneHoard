@@ -160,24 +160,43 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 | Method + Path | Body / Response |
 |---|---|
 | `GET /api/settings` | Returns settings dict. `spotify_client_secret` is masked (`********`) so the client doesn't echo it back as a literal value. |
-| `PATCH /api/settings` | Partial update; client must omit (not echo) the masked secret. Persists to `.tunehoard_settings.json`. |
-| `GET /api/library` | Reads `<library_dir>/index.csv`, returns `[{id, cam, key, bpm, artist, title, source, bucket, file}]`. `key` field is the *short* musical form (`"Am"`), not the full `"A minor"`. |
+| `PATCH /api/settings` | Partial update; client must omit (not echo) the masked secret. Persists to `.tunehoard_settings.json`. The deprecated `output_dir` key is silently dropped by `save_settings`. |
+| `GET /api/preview?url=` | Lightweight URL → title resolution. YT/SC use `extract_flat`; Spotify uses spotipy. Used by the dashboard's URL bar to replace the mock detection labels with real titles. Returns `{kind, label, name?, track_count?}`. Doesn't download. |
+| `GET /api/library` | Reads `<library_dir>/index.csv`, returns `[{id, cam, key, bpm, artist, title, source, bucket, file}]`. `key` field is the *short* musical form (`"Am"`), not the full `"A minor"`. Tracks with empty BPM get `bucket: "unknown-bpm"` (not a numeric range). |
+| `POST /api/library/scan?read_bpm_key=&analyze_missing=` | Walks `library_dir` for MP3s and merges new rows into `index.csv`. Always reads title/artist/album. `read_bpm_key=true` also pulls TBPM/TKEY/TXXX. `analyze_missing=true` (implies `read_bpm_key=true`) additionally runs `analyzer.analyze()` on tracks lacking BPM/Camelot — slow (~3s/track) but populates everything. Smart-fill: existing rows preserved, blank fields backfilled. Returns `{total, added, kept, filled, csv}`. |
 | `PATCH /api/tracks/{id}` | Body `{bpm?, camelot?, key?}`. Updates the row, retags ID3, renames + re-buckets the file using existing `main.py` helpers. Atomic CSV write afterwards. |
 | `DELETE /api/tracks/{id}` | Removes the MP3 from disk + the row from the CSV. |
 | `POST /api/tracks/{id}/move` | Body `{to_bucket, new_bpm?}`. Drag-drop endpoint. If `new_bpm` is omitted, the server applies the same auto-pick rules as the dashboard's drag handler (half-time → double, double-time → half, else bucket midpoint). |
 | `POST /api/tracks/{id}/reanalyze` | Re-runs `analyzer.analyze()` on the file, updates row, retags. Preserves the file's existing TKEY format (Camelot vs musical) — does not migrate. |
+| `POST /api/tracks/{id}/open-folder` | Resolves the track's MP3 path on disk, opens the parent folder in the OS file manager via `os.startfile` / `xdg-open` / `open`. |
+| `POST /api/buckets/{name}/open-folder` | Opens `<library_dir>/<name>/` in the OS file manager. |
 | `POST /api/migrate-keys` | Body `{key_format}`. Bulk: rewrites every file's TKEY + filename prefix to the requested format. Persists `key_format` as the new default in settings. |
-| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess. Returns the new job's id + initial state. |
+| `POST /api/spotify/authorize` | Triggers the spotipy OAuth flow synchronously. Opens `accounts.spotify.com` in the user's browser, blocks until they authorize, then verifies via `sp.current_user()`. Token cached to `.spotify_cache`. Returns `{status: "authorized", user}`. |
+| `GET /api/spotify/status` | Lightweight check: `{configured: bool, authorized: bool}`. Doesn't validate the cached token over the network. |
+| `POST /api/browse` | Body `{mode: "directory"\|"file", title?, initial?}`. Pops a native tkinter folder/file picker. Used by the dashboard's `[Browse...]` buttons. tkinter dialog runs in the uvicorn worker thread (sync handler) — non-blocking for other endpoints. Returns `{path}` or `{path: null}` on cancel. |
+| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess with `--out=<library_dir.parent> --into=<library_dir.name>` so all downloads merge into the user's currently-viewed library. Popen handle stored in `PROCS` dict for cancel. Returns the new job's id + initial state. |
 | `GET /api/jobs` | All jobs. `log` is truncated to last 3 lines per entry (full log via `/api/jobs/{id}/log`). |
 | `GET /api/jobs/{id}` / `GET /api/jobs/{id}/log` | Full single-job state / full log tail (default 100 lines, override with `?tail=N`). |
+| `DELETE /api/jobs/{id}` | Cancel a running job. Marks status `cancelled`, calls `_kill_process_tree` (Windows: `taskkill /F /T /PID` so yt-dlp + ffmpeg children don't orphan; POSIX: `terminate` then `kill` after 2s), removes from JOBS. Runner thread guard prevents the `proc.wait()` exit from overwriting the cancelled status with `failed`. |
 | `GET /` | Serves `dashboard/tunehoard/tunehoard.html`. |
 | `GET /static/*` | Anything else under `dashboard/tunehoard/` (e.g., user-uploaded MP3s for failed-track manual recovery). |
+
+### Server-side helpers
+
+- `_open_in_file_manager(path)` — Windows: `os.startfile`. macOS: `subprocess open`. Linux: `subprocess xdg-open`.
+- `_kill_process_tree(proc)` — Windows: `taskkill /F /T /PID <pid>`. POSIX: terminate→wait(2s)→kill.
+- `_short_musical_to_full(short)` — `"Am"` → `"A minor"`, `"C#"` → `"C# major"`. Inverse of `camelot.musical_key_short`. Used by the scan endpoint to populate the CSV's full-name `key` column from `TXXX:MUSICAL_KEY` short-form values.
+- `_classify_key_format(s)` — regex match on TKEY values: `\d+[AB]` → `"camelot"`, `[A-G][#b]?m?` → `"musical"`, else None. Imported from `main.py`.
+- `_apply_row_to_disk(row, out_dir, key_format)` — Single-track equivalent of the CLI's bucket-sync pass. Re-tags + renames + re-buckets one MP3 from a row dict. Used by every track-mutation endpoint so dashboard edits behave identically to a `--bucket-by-bpm` CLI run.
+- `_to_dashboard_track(row)` — CSV row → JSON shape. Treats blank/0 BPM as `bucket="unknown-bpm"` rather than letting `bpm_bucket(0)` produce a nonsense range like `"-5-4"`.
 
 ### Settings model
 
 `load_settings()` merges `DEFAULT_SETTINGS` with the contents of `.tunehoard_settings.json` (gitignored). `save_settings()` writes atomically (`.json.tmp` then `replace()`). Every endpoint that mutates state calls `load_settings()` fresh — there's no in-memory settings cache. Cheap and avoids the "stale config" class of bugs.
 
-`library_dir` points to a single playlist directory (containing `index.csv`). For multi-playlist support later, the schema is the same — we'd just walk the parent and merge multiple CSVs, tagging each row with its source playlist. Not done yet.
+`library_dir` is the **single source of truth** for the user's "where do my files live" choice — it serves as both the download destination (via `--out=<parent> --into=<name>` when spawning `main.py`) and the library tree's source. The earlier `output_dir` / `library_dir` split was confusing and got merged in May 2026; old configs are migrated automatically: if `library_dir` is empty and `output_dir` is set, the value is folded in and `output_dir` is dropped. `save_settings` strips `output_dir` on every write so it can never come back.
+
+For multi-playlist support later, the schema is the same — we'd just walk the parent and merge multiple CSVs, tagging each row with its source playlist. Not done yet.
 
 ## Dashboard (`dashboard/tunehoard/tunehoard.html`)
 
@@ -198,11 +217,45 @@ The user briefly sees mock data on first paint (~50 ms) before real data takes o
 
 Each interactive control fires a backend call after the local UI update succeeds (optimistic-update pattern). On backend failure, a `toast()` shows the error and the local state is rolled back where reasonable:
 
-- **Drag-drop** → `POST /api/tracks/{id}/move`. On failure, the track is restored to its source bucket and the BPM reverted.
-- **Edit form Save** → `PATCH /api/tracks/{id}`.
-- **Edit form Re-analyze** → `POST /api/tracks/{id}/reanalyze`. Updates the row in-place from the response.
-- **Edit form Delete** → `DELETE /api/tracks/{id}`. Triggers a library refresh on failure to resync.
+- **URL bar** → `GET /api/preview?url=` (debounced 450 ms with `AbortController` to ignore stale responses while user keeps typing).
 - **Download button** → `POST /api/jobs` with the toggle-pill values (bucket / fallback / skip-existing).
-- **Key-format radio** → `PATCH /api/settings`.
-- **Settings field blur** (`#s-out`, `#s-cid`, `#s-csec`) → `PATCH /api/settings`. Field for the secret is skipped if its value is just asterisks (the masked placeholder from the server).
-- **"Open in folder"** is intentionally a no-op — browsers can't launch a native file explorer. Fixing this requires wrapping with pywebview (separate task).
+- **Job `[X]` cancel** → `DELETE /api/jobs/{id}`. Optimistic local removal, server kills the subprocess tree.
+- **Drag-drop track row** → `POST /api/tracks/{id}/move`. On failure, the track is restored to its source bucket and the BPM reverted.
+- **Bucket-move bulk button** → inline `.ctx-menu`-styled bucket picker; click a bucket → loops `moveTrack` over selected ids.
+- **Edit form Save / Re-analyze / Delete** → `PATCH` / `POST .../reanalyze` / `DELETE` per track.
+- **Edit form "Open in folder"** → `POST /api/tracks/{id}/open-folder` (spawns Explorer / Finder).
+- **Bulk Re-analyze / Delete** → loop the per-track endpoints sequentially with progress toasts every 5 tracks.
+- **Bucket header right-click → "Open folder in Explorer"** → `POST /api/buckets/{name}/open-folder`.
+- **Bucket header right-click → "Re-analyze all in bucket"** → loops `reanalyzeTrack` over the bucket's tracks with `showModal` confirmation.
+- **Empty-library `[ Scan folder ]` button** → `showModal` 3-button dialog (Abort / Read tags only / Analyze missing) → `POST /api/library/scan` with the chosen flags.
+- **Settings → Output Folder field blur** → `PATCH /api/settings` with `library_dir`. Triggers `refreshLibrary()` afterwards so the tree reflects the new folder.
+- **Settings → Output Folder `[Browse...]`** → `POST /api/browse` (tkinter directory picker), then writes the result into the input and fires its blur handler.
+- **Settings → ffmpeg path `[Browse...]`** → `POST /api/browse` (file picker).
+- **Settings → Spotify Client ID / Secret blur** → `PATCH /api/settings`. The masked secret (`********`) is skipped on PATCH so the client doesn't echo it back.
+- **Settings → `[ Authorize ]`** → `POST /api/spotify/authorize` (blocks while the user completes OAuth in a new browser tab).
+- **Settings → status pill** → updated from `GET /api/spotify/status` on page load AND after Spotify field blurs.
+- **Key-format radio** → `PATCH /api/settings`. Soft preference: existing files are NOT migrated.
+- **Settings → `[ Migrate existing library ]`** → `showModal` confirm → `POST /api/migrate-keys` with the chosen format.
+- **Source list `[↑]/[↓]`** → reorders DOM, then `PATCH /api/settings` with the new `sources` array.
+- **Welcome modal `[ Continue >> ]`** → if the user picked a folder, `PATCH /api/settings` with `library_dir` and refresh the library.
+
+### Initial settings sync
+
+A standalone IIFE at module load (`syncSettingsToDom`) calls `GET /api/settings` once and applies all values to the DOM (output dir field, ffmpeg path, key-format radio, source order, Spotify status pill). This used to live inside a `window.showSettings = async function...` wrapper, but `function` declarations create a lexical binding that's captured by `addEventListener('click', showSettings)` — reassigning `window.showSettings` later doesn't change what the click handler points to. The wrapper never fired, so saved settings never reapplied to the DOM after page reload. The IIFE pattern bypasses the entire problem: it runs at script-load time, regardless of which view is currently visible.
+
+### Library tree rendering
+
+`renderLib()` skips empty buckets entirely (`if(all.length === 0) continue`). So if your library has tracks only at 95-104 BPM, you see one bucket header in the tree — not all 13 possible bands with `0 tracks` next to each. The order stays sorted (low→high, `unknown-bpm` last) for whichever buckets do render.
+
+### Selection vs editing are mutually exclusive
+
+Plain click on a track row → opens that row's inline edit form, closes any other open form, **clears multi-selection**. Shift/Ctrl-click → toggles selection only, **closes any open edit form**. This means the per-row edit form and the bulk-action bar are never on screen at the same time; users don't see redundant Re-analyze / Delete buttons fighting for attention. Implemented in the `tree.addEventListener('click', ...)` handler.
+
+### Custom modal: `showModal({title, body, ok, cancel?, third?})`
+
+Replaces native `confirm()` / `alert()` so the popup matches the dashboard's NFO aesthetic (reuses the `.overlay` checkered backdrop and `.welcome` box class from the welcome screen). Returns `Promise<true | false | 'third'>`:
+
+- `cancel=null` → single-button (alert-style); always resolves true.
+- `third=null` → two-button (confirm-style); resolves true|false.
+- `third` set → three buttons left-to-right: `cancel`, `third`, `ok`. Used for the scan dialog's `[ Abort ] [ Read tags only ] [ Analyze missing ]`.
+- Enter → ok (rightmost, primary). Esc / click-outside → cancel (only if `cancel` is set; without a cancel button the user has to pick an option).

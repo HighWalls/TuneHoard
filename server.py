@@ -32,6 +32,7 @@ del _os
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -39,6 +40,12 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any
+
+from mutagen.id3 import ID3, ID3NoHeaderError
+
+# Progress-parsing patterns for main.py's stdout.
+_TOTAL_RE = re.compile(r"\((\d+)\s+tracks?\)")
+_DONE_RE = re.compile(r"^Done\.\s+(\d+)\s+new")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -56,6 +63,7 @@ from camelot import musical_key_short
 from main import (  # type: ignore[no-redef]
     CSV_FIELDS,
     _bpm_sort_key,
+    _classify_key_format,
     _expected_filename,
     _existing_tkey_format,
     _find_disk_file,
@@ -65,7 +73,9 @@ from main import (  # type: ignore[no-redef]
     safe_filename,
     safe_replace,
 )
+from spotify_client import _spotify_client, get_playlist_tracks, get_track
 from tagger import tag_file
+from ytdlp_loader import get_ytdlp_tracks, is_soundcloud_url, is_youtube_url
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -76,8 +86,9 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard" / "tunehoard"
 DASHBOARD_HTML = DASHBOARD_DIR / "tunehoard.html"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "output_dir": str(PROJECT_ROOT / "downloads"),
-    "library_dir": "",  # path to a single playlist directory containing index.csv
+    # The single folder where MP3s are downloaded AND the library is read from.
+    # Also used as `--out / --into` when spawning main.py jobs.
+    "library_dir": str(PROJECT_ROOT / "downloads"),
     "spotify_client_id": "",
     "spotify_client_secret": "",
     "sources": ["youtube", "soundcloud"],
@@ -93,13 +104,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 def load_settings() -> dict[str, Any]:
     if SETTINGS_FILE.exists():
         try:
-            return {**DEFAULT_SETTINGS, **json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))}
+            stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            # One-time migration: older configs had a separate output_dir.
+            # If library_dir is empty/missing and output_dir is set, fold it in.
+            if not stored.get("library_dir") and stored.get("output_dir"):
+                stored["library_dir"] = stored["output_dir"]
+            stored.pop("output_dir", None)
+            return {**DEFAULT_SETTINGS, **stored}
         except Exception:
             pass
     return dict(DEFAULT_SETTINGS)
 
 
 def save_settings(s: dict[str, Any]) -> None:
+    # Never persist the dead output_dir key, even if the caller passes it.
+    s = {k: v for k, v in s.items() if k != "output_dir"}
     tmp = SETTINGS_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(s, indent=2), encoding="utf-8")
     tmp.replace(SETTINGS_FILE)
@@ -125,10 +144,15 @@ def _read_library() -> list[dict[str, Any]]:
 
 
 def _write_library(rows: list[dict[str, Any]]) -> None:
-    """Atomic write — same shape as main.py's CSV write block."""
-    csv_path = _csv_path()
-    if csv_path is None:
+    """Atomic write — same shape as main.py's CSV write block. Creates the
+    destination path even if no index.csv exists yet (used by /api/library/scan
+    for first-time initialization of a folder)."""
+    s = load_settings()
+    if not s["library_dir"]:
         return
+    out_dir = Path(s["library_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "index.csv"
     sorted_rows = sorted(rows, key=lambda r: (str(r.get("camelot", "")), _bpm_sort_key(r)))
     tmp = csv_path.with_suffix(".csv.tmp")
     with tmp.open("w", newline="", encoding="utf-8") as f:
@@ -144,18 +168,25 @@ def _to_dashboard_track(row: dict[str, Any]) -> dict[str, Any]:
     cam = row.get("camelot", "") or ""
     key_full = row.get("key", "") or ""
     musical = musical_key_short(key_full) if key_full else ""
-    bpm = int(row.get("bpm", 0) or 0)
+    # When BPM is missing, bucket should be 'unknown-bpm' — passing 0 to
+    # bpm_bucket() would compute a nonsense band like '-5-4'.
+    bpm_str = (row.get("bpm") or "").strip() if isinstance(row.get("bpm"), str) else row.get("bpm")
+    try:
+        bpm_val = int(bpm_str) if bpm_str not in (None, "") else 0
+    except (ValueError, TypeError):
+        bpm_val = 0
+    bucket = bpm_bucket(bpm_val) if bpm_val > 0 else "unknown-bpm"
     src = (row.get("source", "") or "").lower()
     src_short = {"youtube": "YT", "soundcloud": "SC", "spotify": "SP"}.get(src, "")
     return {
         "id": row.get("spotify_id", "") or "",
         "cam": cam,
         "key": musical,
-        "bpm": bpm,
+        "bpm": bpm_val,
         "artist": row.get("artist", "") or "",
         "title": row.get("title", "") or "",
         "source": src_short,
-        "bucket": bpm_bucket(bpm),
+        "bucket": bucket,
         "file": row.get("file", "") or "",
     }
 
@@ -221,6 +252,9 @@ def _apply_row_to_disk(
 # Jobs — subprocess-based. We launch main.py per request.
 # ──────────────────────────────────────────────────────────────────────
 JOBS: dict[str, dict[str, Any]] = {}
+# Live subprocess.Popen handles for running jobs. Kept separate from JOBS so
+# we don't leak non-JSON-serializable values into the API responses.
+PROCS: dict[str, subprocess.Popen] = {}
 JOBS_LOCK = threading.Lock()
 
 
@@ -235,11 +269,21 @@ def _spawn_job(
 ) -> str:
     job_id = f"j{int(time.time() * 1000)}"
     s = load_settings()
+    # Pin the destination to the user's currently-viewed library directory so
+    # that single-track downloads, new-playlist downloads, and incremental
+    # adds all merge into the same folder. --into overrides the loader's
+    # default ("singles" or the playlist title).
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured — open Settings")
+    lib_dir = Path(s["library_dir"])
+    out_parent = str(lib_dir.parent)
+    into_name = lib_dir.name
     args = [
         sys.executable,
         str(PROJECT_ROOT / "main.py"),
         url,
-        "--out", s["output_dir"],
+        "--out", out_parent,
+        "--into", into_name,
         "--sources", ",".join(sources or s["sources"]),
         "--key-format", key_format,
     ]
@@ -266,6 +310,7 @@ def _spawn_job(
         "done": 0,
         "failed": 0,
         "current": "",
+        "eta_sec": 0,
         "started_at": time.time(),
         "finished_at": None,
     }
@@ -287,7 +332,9 @@ def _spawn_job(
             with JOBS_LOCK:
                 job["status"] = "running"
                 job["pid"] = proc.pid
+                PROCS[job_id] = proc
             assert proc.stdout is not None
+            track_in_progress = False  # True between a "→ Track" and the next track-end signal
             for line in proc.stdout:
                 line = line.rstrip("\r\n")
                 if not line:
@@ -296,31 +343,69 @@ def _spawn_job(
                     job["log"].append(line)
                     if len(job["log"]) > 2000:
                         job["log"] = job["log"][-1500:]
-                    # crude progress parsing
-                    if "tracks)" in line and "→" in line:
-                        # "  → 'name' (184 tracks)"
-                        try:
-                            n = int(line.split("(")[1].split()[0])
-                            job["total"] = n
-                        except Exception:
-                            pass
-                    elif "→ " in line and "skipped" not in line:
-                        job["current"] = line.split("→ ", 1)[1].strip()
-                    elif "skipped" in line:
-                        job["failed"] += 1
-                    elif "Done." in line:
+
+                    # Final summary line — set status + saturate the progress bar.
+                    if _DONE_RE.match(line):
+                        if job.get("total"):
+                            job["done"] = job["total"]
+                        job["current"] = ""
+                        job["eta_sec"] = 0
                         job["status"] = "done"
+                        continue
+
+                    # Total tracks announcement: "  → 'name' (N tracks)"
+                    if "tracks" in line and "(" in line:
+                        m = _TOTAL_RE.search(line)
+                        if m:
+                            job["total"] = int(m.group(1))
+                            continue
+
+                    # Per-track start: a line that BEGINS with "→ " (no leading
+                    # whitespace). Excludes the playlist intro (2-space indent),
+                    # bucket-sync info, and the "Index → path" substring in the
+                    # Done line (handled above).
+                    if line.startswith("→ "):
+                        # Bumping done on the *next* track start means the previous
+                        # one finished. Cap at total to be safe.
+                        if track_in_progress:
+                            tot = job.get("total") or 0
+                            job["done"] = min(job.get("done", 0) + 1, tot or job.get("done", 0) + 1)
+                        job["current"] = line[2:].strip()
+                        track_in_progress = True
+                        # ETA from elapsed + rate
+                        d, t = job.get("done", 0), job.get("total", 0)
+                        if d > 0 and t > 0:
+                            elapsed = time.time() - job["started_at"]
+                            rate = d / elapsed
+                            if rate > 0:
+                                job["eta_sec"] = int((t - d) / rate)
+                        continue
+
+                    # Skipped track ("  ! skipped (no match on any source)")
+                    if "skipped" in line:
+                        job["failed"] += 1
+                        if track_in_progress:
+                            tot = job.get("total") or 0
+                            job["done"] = min(job.get("done", 0) + 1, tot or job.get("done", 0) + 1)
+                            track_in_progress = False
+                        continue
             proc.wait()
             with JOBS_LOCK:
                 job["finished_at"] = time.time()
-                if proc.returncode != 0 and job["status"] != "done":
+                # If a DELETE marked the job cancelled, leave it alone.
+                if job["status"] in ("cancelled", "done"):
+                    pass
+                elif proc.returncode != 0:
                     job["status"] = "failed"
                 elif job["status"] == "running":
                     job["status"] = "done"
+                PROCS.pop(job_id, None)
         except Exception as e:
             with JOBS_LOCK:
-                job["status"] = "failed"
+                if job["status"] != "cancelled":
+                    job["status"] = "failed"
                 job["log"].append(f"!! server error: {e}")
+                PROCS.pop(job_id, None)
 
     threading.Thread(target=runner, daemon=True).start()
     return job_id
@@ -334,7 +419,6 @@ app = FastAPI(title="TuneHoard", version="0.1.0")
 
 # ── Settings ──────────────────────────────────────────────────────────
 class SettingsPatch(BaseModel):
-    output_dir: str | None = None
     library_dir: str | None = None
     spotify_client_id: str | None = None
     spotify_client_secret: str | None = None
@@ -368,10 +452,230 @@ def api_patch_settings(patch: SettingsPatch) -> dict[str, Any]:
     return api_get_settings()
 
 
+# ── URL preview (lightweight, no download) ────────────────────────────
+@app.get("/api/preview")
+def api_preview(url: str) -> dict[str, Any]:
+    """Hit the right loader to get a real title/track-count for the input URL.
+
+    YouTube / SoundCloud go through yt-dlp's extract_info (extract_flat). Spotify
+    goes through spotipy if creds are configured. No downloading happens.
+    """
+    url = (url or "").strip()
+    if not url:
+        return {"kind": "empty", "label": ""}
+    s = load_settings()
+    try:
+        if is_youtube_url(url):
+            name, tracks = get_ytdlp_tracks(url, "yt")
+            src_label, src_short = "YouTube", "yt"
+            single_word = "video"
+        elif is_soundcloud_url(url):
+            name, tracks = get_ytdlp_tracks(url, "sc")
+            src_label, src_short = "SoundCloud", "sc"
+            single_word = "track"
+        elif "open.spotify.com" in url or url.startswith("spotify:"):
+            cid, cs = s["spotify_client_id"], s["spotify_client_secret"]
+            if not cid or not cs:
+                return {"kind": "sp-unconfigured", "label": "Spotify not configured — open Settings"}
+            if "/track/" in url or url.startswith("spotify:track:"):
+                name, tracks = get_track(url, cid, cs)
+            else:
+                name, tracks = get_playlist_tracks(url, cid, cs)
+            src_label, src_short = "Spotify", "sp"
+            single_word = "track"
+        else:
+            return {"kind": "unsupported", "label": "unsupported URL"}
+    except Exception as e:
+        return {"kind": "error", "label": f"preview failed: {type(e).__name__}"}
+
+    if name == "singles" and len(tracks) == 1:
+        t = tracks[0]
+        return {
+            "kind": f"{src_short}-tr",
+            "label": f"{src_label} {single_word}: {t.primary_artist} — {t.title}",
+            "name": name,
+            "track_count": 1,
+        }
+    return {
+        "kind": f"{src_short}-pl",
+        "label": f'{src_label} playlist: "{name}" — {len(tracks)} tracks',
+        "name": name,
+        "track_count": len(tracks),
+    }
+
+
 # ── Library ───────────────────────────────────────────────────────────
 @app.get("/api/library")
 def api_get_library() -> list[dict[str, Any]]:
     return [_to_dashboard_track(r) for r in _read_library()]
+
+
+def _short_musical_to_full(short: str) -> str:
+    """'Am' -> 'A minor', 'C' -> 'C major', 'C#m' -> 'C# minor'.
+    Inverse of camelot.musical_key_short(). Empty string for unrecognized."""
+    if not short:
+        return ""
+    m = re.match(r"^([A-G][#b]?)(m?)$", short.strip())
+    if not m:
+        return ""
+    root, mode = m.group(1), m.group(2)
+    return f"{root} {'minor' if mode else 'major'}"
+
+
+@app.post("/api/library/scan")
+def api_scan_library(
+    read_bpm_key: bool = False,
+    analyze_missing: bool = False,
+) -> dict[str, Any]:
+    """Walk library_dir for MP3s and add rows for any not yet in index.csv.
+
+    Default behavior is intentionally lightweight: only title / artist / album
+    are read from each MP3's ID3 tags. BPM, Camelot, and key are LEFT BLANK.
+
+    `read_bpm_key=true` — also pull TBPM / TKEY / TXXX:CAMELOT_KEY /
+    TXXX:MUSICAL_KEY out of the file's existing tags. Fast, trusts whatever
+    the previous tagger wrote.
+
+    `analyze_missing=true` — implies read_bpm_key=true. AFTER reading tags,
+    for any track that still has no BPM AND no Camelot value, run librosa
+    `analyze()` to detect them. Slow (~3s per analyzed track) but populates
+    every track. Useful when scanning a folder that's a mix of pre-tagged
+    files and raw rips.
+
+    Merge-safe: existing rows are preserved; previously-unindexed MP3s get
+    new rows; existing rows with blank BPM/key get filled in (never overwritten
+    if they already have a value). Re-running scan repeatedly is idempotent.
+    """
+    # analyze_missing implies read_bpm_key — we always check existing tags
+    # before falling back to librosa.
+    if analyze_missing:
+        read_bpm_key = True
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured")
+    out_dir = Path(s["library_dir"])
+    if not out_dir.exists():
+        raise HTTPException(404, f"folder doesn't exist: {out_dir}")
+
+    # Merge-safe with smart fill:
+    #   • read_bpm_key=False → existing rows preserved as-is, new rows added with
+    #     blank BPM/Camelot. (Cancel branch.)
+    #   • read_bpm_key=True  → existing rows preserved, BUT blank BPM/Camelot/key
+    #     fields get filled in from tags (so re-scanning after a Cancel actually
+    #     does something useful). Non-blank values are NEVER overwritten — your
+    #     hand-edits and prior tag reads are safe.
+    # MP3 ID3 tags themselves are never modified by scan; we only read them.
+    existing_rows = _read_library()
+    existing_by_file = {r.get("file"): r for r in existing_rows if r.get("file")}
+
+    rows: list[dict[str, Any]] = []
+    added = 0
+    kept = 0
+    filled = 0  # existing rows whose blank fields were populated from tags
+    for mp3 in sorted(out_dir.rglob("*.mp3")):
+        existing = existing_by_file.get(mp3.name)
+
+        # Fast path: cancel branch with an existing row → keep as-is.
+        if existing and not read_bpm_key:
+            rows.append(existing)
+            kept += 1
+            continue
+
+        try:
+            tags = ID3(mp3)
+        except (ID3NoHeaderError, Exception):
+            tags = None
+
+        def get_text(frame_id: str) -> str:
+            if not tags or frame_id not in tags:
+                return ""
+            try:
+                return str(tags[frame_id].text[0])
+            except Exception:
+                return ""
+
+        title = get_text("TIT2") or mp3.stem
+        artist = get_text("TPE1")
+        album = get_text("TALB")
+
+        bpm: int | str = ""
+        camelot = ""
+        key_full = ""
+        if read_bpm_key:
+            bpm_str = get_text("TBPM")
+            try:
+                bpm = int(bpm_str) if bpm_str else ""
+            except ValueError:
+                bpm = ""
+            # Camelot: prefer the dedicated TXXX frame TuneHoard writes,
+            # fall back to TKEY if its value parses as Camelot.
+            camelot = get_text("TXXX:CAMELOT_KEY")
+            if not camelot:
+                tkey = get_text("TKEY")
+                if _classify_key_format(tkey) == "camelot":
+                    camelot = tkey
+            # Musical key: prefer dedicated TXXX, fall back to TKEY if musical.
+            musical_short = get_text("TXXX:MUSICAL_KEY")
+            if not musical_short:
+                tkey = get_text("TKEY")
+                if _classify_key_format(tkey) == "musical":
+                    musical_short = tkey
+            key_full = _short_musical_to_full(musical_short)
+
+        # If still missing BPM/Camelot AND user asked for analysis, run librosa.
+        if analyze_missing and (bpm == "" or not camelot):
+            try:
+                result = analyze(mp3)
+                if bpm == "":
+                    bpm = result.bpm
+                if not camelot:
+                    camelot = result.camelot
+                if not key_full:
+                    key_full = result.key_name
+            except Exception:
+                pass  # leave whatever we have; row still gets added
+
+        if existing:
+            # Smart fill: copy existing row, only update fields that are blank.
+            merged = dict(existing)
+            updated = False
+            if not (existing.get("bpm") or "").strip() and bpm != "":
+                merged["bpm"] = str(bpm)
+                updated = True
+            if not (existing.get("camelot") or "").strip() and camelot:
+                merged["camelot"] = camelot
+                updated = True
+            if not (existing.get("key") or "").strip() and key_full:
+                merged["key"] = key_full
+                updated = True
+            rows.append(merged)
+            if updated:
+                filled += 1
+            else:
+                kept += 1
+            continue
+
+        rows.append({
+            "camelot": camelot,
+            "bpm": str(bpm) if bpm != "" else "",
+            "artist": artist,
+            "title": title,
+            "album": album,
+            "key": key_full,
+            "source": "scanned",
+            "file": mp3.name,
+            "spotify_id": f"scan:{mp3.name}",
+        })
+        added += 1
+
+    _write_library(rows)
+    return {
+        "total": len(rows),
+        "added": added,
+        "kept": kept,
+        "filled": filled,
+        "csv": str(out_dir / "index.csv"),
+    }
 
 
 # ── Tracks ────────────────────────────────────────────────────────────
@@ -593,6 +897,190 @@ def api_get_job_log(job_id: str, tail: int = 100) -> dict[str, Any]:
         if job_id not in JOBS:
             raise HTTPException(404, "job not found")
         return {"id": job_id, "log": JOBS[job_id]["log"][-tail:]}
+
+
+class BrowseReq(BaseModel):
+    mode: str = "directory"   # 'directory' or 'file'
+    title: str | None = None
+    initial: str | None = None
+
+
+@app.post("/api/browse")
+def api_browse(req: BrowseReq) -> dict[str, Any]:
+    """Pop a native OS folder/file picker on the user's machine. Server runs
+    locally, so the dialog appears in front of their browser. Cancellation
+    returns path=null. tkinter blocks the worker thread; uvicorn dispatches
+    sync handlers off the event loop, so other endpoints stay responsive."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as e:
+        raise HTTPException(500, f"tkinter unavailable: {e}")
+
+    title = req.title or ("Choose folder" if req.mode == "directory" else "Choose file")
+    initial = req.initial or None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        # On Windows the dialog can hide behind the browser without this hint.
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        if req.mode == "file":
+            chosen = filedialog.askopenfilename(title=title, initialdir=initial)
+        else:
+            chosen = filedialog.askdirectory(title=title, initialdir=initial)
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    return {"path": chosen or None}
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Open a file or folder in the OS-native file manager.
+    Windows: Explorer. macOS: Finder. Linux: xdg-open (whichever DE)."""
+    if sys.platform == "win32":
+        os.startfile(str(path))  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=False)
+
+
+@app.post("/api/tracks/{track_id}/open-folder")
+def api_open_track_folder(track_id: str) -> dict[str, Any]:
+    """Open the folder containing a track's MP3 in the OS file manager."""
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured")
+    rows = _read_library()
+    row = _find_row(rows, track_id)
+    if row is None:
+        raise HTTPException(404, "track not found")
+    out_dir = Path(s["library_dir"])
+    by_name, all_paths = _disk_index(out_dir)
+    path = _find_disk_file(row, by_name, all_paths)
+    if path is None:
+        raise HTTPException(404, "MP3 file not found on disk")
+    folder = path.parent
+    try:
+        _open_in_file_manager(folder)
+    except Exception as e:
+        raise HTTPException(500, f"failed to open: {e}")
+    return {"opened": str(folder)}
+
+
+@app.post("/api/buckets/{bucket_name}/open-folder")
+def api_open_bucket_folder(bucket_name: str) -> dict[str, Any]:
+    """Open a BPM-bucket folder in the OS file manager."""
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured")
+    target = Path(s["library_dir"]) / bucket_name
+    if not target.exists():
+        raise HTTPException(404, f"bucket folder '{bucket_name}' does not exist")
+    try:
+        _open_in_file_manager(target)
+    except Exception as e:
+        raise HTTPException(500, f"failed to open: {e}")
+    return {"opened": str(target)}
+
+
+@app.post("/api/spotify/authorize")
+def api_spotify_authorize() -> dict[str, Any]:
+    """Trigger spotipy's OAuth flow. Opens the user's browser to
+    accounts.spotify.com, blocks until they complete the flow (or until
+    spotipy's local callback server gives up). Token cached to .spotify_cache.
+    """
+    s = load_settings()
+    if not s["spotify_client_id"] or not s["spotify_client_secret"]:
+        raise HTTPException(400, "Set Spotify Client ID and Secret in Settings first")
+    try:
+        sp = _spotify_client(s["spotify_client_id"], s["spotify_client_secret"])
+        me = sp.current_user()
+        name = me.get("display_name") or me.get("id") or "unknown"
+        return {"status": "authorized", "user": name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"authorize failed: {type(e).__name__}: {e}")
+
+
+@app.get("/api/spotify/status")
+def api_spotify_status() -> dict[str, Any]:
+    """Lightweight check: are creds set + is a token cached. Doesn't
+    re-validate the token (that would force a network round-trip)."""
+    s = load_settings()
+    cache_path = PROJECT_ROOT / ".spotify_cache"
+    has_creds = bool(s["spotify_client_id"] and s["spotify_client_secret"])
+    has_cache = cache_path.exists()
+    return {
+        "configured": has_creds,
+        "authorized": has_creds and has_cache,
+    }
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and all its descendants. yt-dlp spawns ffmpeg children,
+    so a plain proc.terminate() leaves them as orphans on Windows."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # /T = recursive (the whole tree), /F = force (no graceful close).
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
+        # POSIX: try terminate first, fall back to kill.
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            pass
+
+
+@app.delete("/api/jobs/{job_id}")
+def api_cancel_job(job_id: str) -> dict[str, Any]:
+    """Cancel a running job. Kills the subprocess + its child tree (yt-dlp +
+    ffmpeg) and removes the job from the active list. The runner thread
+    finishes asynchronously and skips its 'failed' / 'done' status update
+    because we've already marked the job 'cancelled'."""
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            raise HTTPException(404, "job not found")
+        job = JOBS[job_id]
+        proc = PROCS.get(job_id)
+        already_done = job["status"] in ("done", "failed", "cancelled")
+        job["status"] = "cancelled"
+        job["finished_at"] = time.time()
+        job["current"] = ""
+
+    if proc is not None and not already_done:
+        _kill_process_tree(proc)
+
+    # Remove from the live JOBS dict so the dashboard's poll stops showing it.
+    with JOBS_LOCK:
+        JOBS.pop(job_id, None)
+        PROCS.pop(job_id, None)
+
+    return {"id": job_id, "status": "cancelled"}
 
 
 # ── Static dashboard ──────────────────────────────────────────────────

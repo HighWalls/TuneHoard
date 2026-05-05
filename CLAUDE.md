@@ -20,6 +20,7 @@ Repo: https://github.com/HighWalls/TuneHoard
 python main.py <url>
     [--sources youtube,soundcloud]  # comma list, tried in order (default)
     [--out downloads]                # output directory
+    [--into <folder>]                # override loader folder name (e.g. merge singles into a playlist dir)
     [--limit N]                      # only process first N tracks
     [--skip-existing]                # skip tracks already in index.csv or on disk
     [--bucket-by-bpm]                # group into BPM-range subfolders + re-tag from CSV
@@ -36,7 +37,22 @@ python main.py <url>
 python server.py    # starts FastAPI at http://127.0.0.1:8765/, auto-opens browser
 ```
 
-Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.html` runs against `server.py`'s API and reads / writes the same `index.csv` files the CLI uses. Settings live in `.tunehoard_settings.json` (gitignored). See `docs/ARCHITECTURE.md` § Dashboard for the API surface.
+Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.html` runs against `server.py`'s API and reads / writes the same `index.csv` files the CLI uses. Settings live in `.tunehoard_settings.json` (gitignored). The dashboard supports:
+
+- URL preview with real titles from the backend (debounced, abortable)
+- Download jobs with live progress / ETA, cancel kills the subprocess tree
+- Library tree with collapsible BPM buckets (empty buckets are hidden)
+- Inline edit form per track (Save / Re-analyze / Open in folder / Delete)
+- Drag-drop tracks between buckets (auto-picks half-time / double-time / midpoint BPM)
+- Bulk action bar on selected rows (Re-analyze / Delete / Move to bucket)
+- Right-click bucket → Open folder in Explorer / Re-analyze all in bucket / Expand–Collapse all
+- Settings page with native file pickers (tkinter), Spotify OAuth, source reorder
+- Three-button "Scan folder" dialog for indexing pre-existing MP3 collections (read tags only / analyze missing via librosa / abort)
+- Manual "Migrate library" button to rewrite TKEY / filename to a new key format
+- Custom NFO-styled modal replaces native `confirm()` / `alert()`
+- Theme switcher (top-left) with 3 presets + Randomize from a curated palette pool
+
+See `docs/ARCHITECTURE.md` § Dashboard for the full API surface and helper-function reference.
 
 ### Setup (either path)
 
@@ -80,6 +96,9 @@ Tracks that fail on every source are written to `failures.txt` alongside `index.
 - **Windows-first.** The dev env is Windows 11. Paths use `pathlib`; filename sanitization strips `<>:"/\|?*` and control chars. stdout/stderr are reconfigured to UTF-8 at startup because the default cp1252 codepage can't print most track titles or the `→` progress arrows.
 - **`--skip-existing` recovers from disk, not just CSV.** If `index.csv` is missing/corrupt but MP3s exist, the flag reconstructs rows from ID3 tags (BPM, Camelot) so you don't re-download 184 tracks. The `key` (full name) and `source` columns are lost in the reconstruction — that's OK, Rekordbox only reads BPM + Camelot.
 - **CSV writes are atomic.** Written to `index.csv.tmp` then `replace()`'d. Prevents a crash in the sort/write block from wiping a valid index.
+- **Single path setting.** The dashboard exposes one folder (labeled "Output Folder" in the UI, `library_dir` in the API + JSON). Downloads go there, the library tree reads from there. The earlier `output_dir`/`library_dir` split was confusing and got merged; old settings files are migrated on load.
+- **Scan can index pre-existing MP3 collections.** Empty library + `[ Scan folder ]` button → walks all MP3s and builds an `index.csv` from filenames + ID3 tags. Two modes: "Read tags only" (fast, leaves unlabeled tracks blank) and "Analyze missing" (also runs librosa on tracks without BPM/key tags — slow but populates everything). Smart-fill: re-running scan never overwrites filled values; only blank fields get populated from tags.
+- **Subprocess job kills are tree-wide.** Cancel button → `taskkill /F /T /PID` on Windows so yt-dlp + ffmpeg children don't orphan. POSIX uses `terminate` then `kill` after 2s.
 
 ## Landmines (read before editing)
 

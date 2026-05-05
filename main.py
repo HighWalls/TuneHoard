@@ -381,6 +381,13 @@ def main() -> int:
         help="Comma-separated sources tried in order (default: youtube,soundcloud)",
     )
     ap.add_argument("--out", default="downloads", help="Output directory (default: downloads)")
+    ap.add_argument(
+        "--into",
+        default=None,
+        help="Override the destination folder name (defaults to the playlist title or "
+             "'singles'). Use this to merge single-track downloads into an existing "
+             "playlist library — e.g. --out 'E:/tracks' --into 'get right!'.",
+    )
     ap.add_argument("--limit", type=int, default=0, help="Only process first N tracks (0 = all)")
     ap.add_argument(
         "--skip-existing",
@@ -450,7 +457,8 @@ def main() -> int:
         tracks = tracks[: args.limit]
         print(f"  → limited to first {len(tracks)}")
 
-    out_dir = Path(args.out) / safe_filename(playlist_name)
+    folder_name = args.into if args.into else playlist_name
+    out_dir = Path(args.out) / safe_filename(folder_name)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = out_dir / "index.csv"
