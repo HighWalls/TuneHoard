@@ -557,15 +557,15 @@ table.lib tbody tr{ cursor:pointer; }
 }
 .sp-pick-search input:focus{ background:var(--ink); color:var(--paper); }
 
-/* Scrub bar — thin progress indicator at the BOTTOM of the playing row.
-   Absolute-positioned so it can't shift the row's horizontal layout when
-   playback starts. The wrapper is 6px tall for a comfy click target; the
-   visible fill is 2px and grows left-to-right via inline width %. */
+/* Per-row scrub indicator — VISUAL ONLY, not interactive. Anchored to the
+   bottom edge of the playing row, can't shift horizontal layout. The actual
+   scrub-to-seek control lives in the now-playing bar at the bottom of the
+   page (#np-scrub) — there's room there for a usable click target. */
 .track-scrub{
   position:absolute;
   left:0; right:0; bottom:0;
-  height:6px;
-  cursor:pointer;
+  height:2px;
+  pointer-events:none;
   background:transparent;
 }
 .track-scrub-fill{
@@ -598,7 +598,9 @@ table.lib tbody tr{ cursor:pointer; }
 .now-playing.hidden{ display:none !important; }
 .now-playing .np-glyph{ font-weight:700; }
 .now-playing .np-title{
-  flex:1;
+  flex:0 1 auto;
+  min-width:120px;
+  max-width:40%;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
@@ -606,6 +608,22 @@ table.lib tbody tr{ cursor:pointer; }
   text-decoration:underline;
 }
 .now-playing .np-title:hover{ background:var(--ink); color:var(--paper); }
+.now-playing .np-scrub{
+  flex:1;
+  min-width:160px;
+  height:10px;
+  position:relative;
+  border:1px solid var(--ink);
+  background:var(--paper);
+  cursor:pointer;
+}
+.now-playing .np-scrub-fill{
+  position:absolute;
+  left:0; top:0; bottom:0;
+  width:0;
+  background:var(--ink);
+  pointer-events:none;
+}
 .now-playing .np-time{ font-variant-numeric: tabular-nums; }
 .now-playing .np-vol-wrap{ display:flex; align-items:center; gap:6px; }
 .now-playing .np-vol{
@@ -776,11 +794,6 @@ hr.tilde::before{
         <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
       </div>
       <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
-
-      <div class="checkrow">
-        <span class="checkbox on" data-key="analyze">[x] Analyze after download</span>
-        <span class="checkbox on" data-key="skip">[x] Skip existing</span>
-      </div>
     </div>
   </div>
 
@@ -885,6 +898,15 @@ hr.tilde::before{
   </div>
 
   <div class="fset">
+    <div class="inset-label">~~ DOWNLOAD BEHAVIOR ~~</div>
+    <div style="margin-bottom:10px;">Defaults applied to every job submitted from this dashboard. <span class="muted">Skip BPM/key analysis</span> is useful when you just want to grab the audio fast — the file lands untagged, and you can run analysis later via <span class="muted">[ Re-analyze ]</span> per row or right-click on a bucket.</div>
+    <div class="row" id="dl-behavior-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:6px;">
+      <span class="checkbox on" data-dl-key="skip_existing">[x] Skip tracks already in the library</span>
+      <span class="checkbox" data-dl-key="skip_analyze">[ ] Skip BPM/key analysis (download only)</span>
+    </div>
+  </div>
+
+  <div class="fset">
     <div class="inset-label">~~ SPOTIFY ~~</div>
     <div class="row">
       <span class="label">Client ID:</span>
@@ -979,6 +1001,7 @@ hr.tilde::before{
 <div id="now-playing" class="now-playing hidden">
   <span class="np-glyph">&#9654;</span>
   <span class="np-title" id="np-title" title="scroll to playing track">artist — title</span>
+  <div class="np-scrub" id="np-scrub" title="seek"><div class="np-scrub-fill" id="np-scrub-fill"></div></div>
   <span class="np-time" id="np-time">0:00 / 0:00</span>
   <button class="btn tiny" id="np-stop" title="stop playback (Esc)">[ &#9633; stop ]</button>
   <span class="np-vol-wrap" title="volume (persists)">
@@ -1647,17 +1670,21 @@ function updateNowPlaying(){
   }
 }
 
-// Update the inline scrub fill on the playing row (if any) without re-rendering.
+// Update the visual scrub fills (per-row + now-playing bar) without re-rendering.
 function updateScrubFill(){
   const audio = document.getElementById('audio-player');
   if(!audio || currentlyPlayingId === null) return;
   const dur = audio.duration;
   if(!isFinite(dur) || dur <= 0) return;
   const pct = Math.max(0, Math.min(1, audio.currentTime / dur));
-  // Per-row scrub
-  const fill = document.querySelector(`.track-row[data-id="${currentlyPlayingId}"] .track-scrub-fill`);
-  if(fill) fill.style.width = (pct * 100) + '%';
-  // Now-playing time readout
+  const pctStr = (pct * 100) + '%';
+  // Per-row scrub indicator (visual only)
+  const rowFill = document.querySelector(`.track-row[data-id="${currentlyPlayingId}"] .track-scrub-fill`);
+  if(rowFill) rowFill.style.width = pctStr;
+  // Now-playing bar scrub (interactive — see click handler in wireAudioPlayer)
+  const npFill = document.getElementById('np-scrub-fill');
+  if(npFill) npFill.style.width = pctStr;
+  // Time readout
   const tEl = document.getElementById('np-time');
   if(tEl) tEl.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(dur);
 }
@@ -1708,6 +1735,18 @@ function updateScrubFill(){
       const v = Math.max(0, Math.min(1, parseInt(volSlider.value, 10) / 100));
       audio.volume = v;
       _saveVolume(v);
+    });
+  }
+  // Now-playing scrub bar — the *only* seek control (the per-row indicator is
+  // visual-only). Click anywhere on the bar to seek proportionally.
+  const npScrub = document.getElementById('np-scrub');
+  if(npScrub){
+    npScrub.addEventListener('click', (e) => {
+      if(!isFinite(audio.duration) || audio.duration <= 0) return;
+      const rect = npScrub.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      audio.currentTime = ratio * audio.duration;
+      updateScrubFill();
     });
   }
   const titleEl = document.getElementById('np-title');
@@ -1874,10 +1913,10 @@ function renderLib(){
         const flag = t.moved ? '!!' : '  ';
         const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
         const playGlyph = playing ? '❚❚' : '▶';
-        // A1: inline scrub bar — only on the currently-playing row. Reserves
-        // visual space without animating layout when the row stops playing.
+        // Visual-only scrub indicator on the playing row (pointer-events:none).
+        // Real seek control is the np-scrub bar at the bottom of the page.
         const scrubMarkup = playing
-          ? `<span class="track-scrub" data-scrub="${t.id}" title="seek"><span class="track-scrub-fill"></span></span>`
+          ? `<span class="track-scrub"><span class="track-scrub-fill"></span></span>`
           : '';
         html += `<div class="track-row${sel}${mv}" data-id="${t.id}">`
               + `<span class="track-moved-flag">${flag}</span>`
@@ -1946,20 +1985,9 @@ tree.addEventListener('click', e=>{
     if(typeof togglePlay === 'function') togglePlay(id);
     return;
   }
-  // A1: scrub bar click → seek. Don't propagate to row select/edit.
-  const scrubEl = e.target.closest('[data-scrub]');
-  if(scrubEl){
-    e.stopPropagation();
-    e.preventDefault();
-    const audio = document.getElementById('audio-player');
-    if(audio && isFinite(audio.duration) && audio.duration > 0){
-      const rect = scrubEl.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      audio.currentTime = ratio * audio.duration;
-      updateScrubFill();
-    }
-    return;
-  }
+  // The per-row scrub indicator is visual-only (pointer-events:none) — clicks
+  // pass through to the row so seek lives in the now-playing bar at the
+  // bottom of the page (#np-scrub click handler in wireAudioPlayer).
   // click in edit form: do not propagate to row toggle
   const editEl = e.target.closest('.track-edit');
   if(editEl){
@@ -2135,7 +2163,6 @@ tree.addEventListener('mousedown', e=>{
   if(!tRow) return;
   if(e.target.closest('.track-edit')) return;
   if(e.target.closest('[data-play]')) return;  // play button is its own click path
-  if(e.target.closest('[data-scrub]')) return; // scrub bar handles its own click
   const id = tRow.dataset.id;
   const sx = e.clientX, sy = e.clientY;
   let armed = true;
@@ -2556,6 +2583,25 @@ $('#layout-row').addEventListener('click', e=>{
     .catch(err => toast('settings save failed: ' + err.message));
 });
 
+// Download behavior — skip_existing + skip_analyze. Persisted to settings;
+// applied to every job submitted from this dashboard. The generic .checkbox
+// click handler (above) toggles the [x]/[ ] glyph; this handler captures
+// the same click and patches the backing setting.
+let skipExisting = true;
+let skipAnalyze = false;
+$('#dl-behavior-row').addEventListener('click', e=>{
+  const cb = e.target.closest('.checkbox[data-dl-key]');
+  if(!cb) return;
+  // The generic .checkbox handler runs first and flips the .on class; read
+  // the post-click state here.
+  const key = cb.dataset.dlKey;
+  const on = cb.classList.contains('on');
+  if(key === 'skip_existing'){ skipExisting = on; }
+  else if(key === 'skip_analyze'){ skipAnalyze = on; }
+  if(window.API) window.API.patchSettings({[key]: on})
+    .catch(err => toast('settings save failed: ' + err.message));
+});
+
 // Migrate button: explicit one-shot retag/rename of the entire library to
 // match the chosen format. Triggered manually only — the radio above never
 // fires this on its own.
@@ -2809,18 +2855,17 @@ $('#dl-btn').addEventListener('click', async ()=>{
     return;
   }
   try{
-    // bucket_by_bpm now lives in Settings (Library Layout); the module-level
-    // `bucketByBpm` is kept in sync with /api/settings on load + on radio click.
-    // The other two URL-row checkboxes use data-key attributes (the previous
-    // #cb-X id lookups never matched, so these had been hardcoded true — when
-    // you wire them up, query by [data-key="..."] instead).
-    const fallback  = document.querySelector('[data-key="analyze"]')?.classList.contains('on') ?? true;
-    const skipExist = document.querySelector('[data-key="skip"]')?.classList.contains('on') ?? true;
+    // All three behavioral toggles now live in Settings:
+    //   - bucket_by_bpm    → Library Layout radios
+    //   - skip_existing    → Download Behavior checkbox
+    //   - skip_analyze     → Download Behavior checkbox
+    // Module-level mirrors are kept in sync with /api/settings on load +
+    // on toggle click. Source order comes from settings too (Sources fset).
     await window.API.startJob({
       url: u,
-      sources: fallback ? ['youtube','soundcloud'] : ['youtube'],
       bucket_by_bpm: bucketByBpm,
-      skip_existing: skipExist,
+      skip_existing: skipExisting,
+      skip_analyze: skipAnalyze,
       key_format: keyFormat,
     });
     $('#url').value = ''; setStatus();
@@ -3283,6 +3328,22 @@ $('#w-continue').addEventListener('click', async ()=>{
           x.classList.toggle('on', on);
           x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
         });
+      }
+      // Download-behavior checkboxes — sync state from settings.
+      const _setCheckbox = (sel, on) => {
+        const cb = document.querySelector(sel);
+        if(!cb) return;
+        cb.classList.toggle('on', !!on);
+        const txt = cb.textContent.replace(/^\[.\]\s*/, '');
+        cb.textContent = (on ? '[x] ' : '[ ] ') + txt;
+      };
+      if(typeof s.skip_existing === 'boolean'){
+        skipExisting = s.skip_existing;
+        _setCheckbox('[data-dl-key="skip_existing"]', s.skip_existing);
+      }
+      if(typeof s.skip_analyze === 'boolean'){
+        skipAnalyze = s.skip_analyze;
+        _setCheckbox('[data-dl-key="skip_analyze"]', s.skip_analyze);
       }
       if(Array.isArray(s.sources) && typeof applySourceOrder === 'function'){
         applySourceOrder(s.sources);

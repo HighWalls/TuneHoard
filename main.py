@@ -97,6 +97,7 @@ def process_track(
     out_dir: Path,
     sources: list[str],
     bucket_by_bpm: bool = False,
+    skip_analyze: bool = False,
     key_format: str = "camelot",
     bpm_min: int = 85,
     bpm_max: int = 200,
@@ -133,13 +134,16 @@ def process_track(
     if not downloaded:
         return None
 
-    try:
-        result = analyze(
-            downloaded, bpm_min=bpm_min, bpm_max=bpm_max, duration=analysis_seconds
-        )
-    except Exception as e:
-        print(f"  ! analysis failed ({e}); keeping file untagged")
+    if skip_analyze:
         result = None
+    else:
+        try:
+            result = analyze(
+                downloaded, bpm_min=bpm_min, bpm_max=bpm_max, duration=analysis_seconds
+            )
+        except Exception as e:
+            print(f"  ! analysis failed ({e}); keeping file untagged")
+            result = None
 
     if result:
         tag_file(
@@ -415,6 +419,13 @@ def main() -> int:
         help="Organize downloads into BPM-range subfolders (115-125, 126-135, ...)",
     )
     ap.add_argument(
+        "--skip-analyze",
+        action="store_true",
+        help="Download only — skip BPM/key analysis. Tracks land untagged with "
+             "an empty BPM/key in the CSV; re-run analysis later via --reanalyze "
+             "or per-track in the dashboard.",
+    )
+    ap.add_argument(
         "--reanalyze",
         action="store_true",
         help="Re-run BPM/key analysis on existing MP3s (for fixing prior half-time errors). "
@@ -558,6 +569,7 @@ def main() -> int:
             out_dir,
             sources,
             bucket_by_bpm=args.bucket_by_bpm,
+            skip_analyze=args.skip_analyze,
             key_format=args.key_format,
             bpm_min=args.bpm_min,
             bpm_max=args.bpm_max,

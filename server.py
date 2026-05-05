@@ -112,6 +112,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "sources": ["youtube", "soundcloud"],
     "key_format": "camelot",
     "bucket_by_bpm": True,
+    "skip_existing": True,
+    "skip_analyze": False,
     "bpm_min": 85,
     "bpm_max": 200,
     "analysis_seconds": 120,
@@ -378,6 +380,7 @@ def _spawn_job(
     sources: list[str],
     bucket_by_bpm: bool,
     skip_existing: bool,
+    skip_analyze: bool,
     key_format: str,
     limit: int,
 ) -> str:
@@ -410,6 +413,8 @@ def _spawn_job(
         args.append("--bucket-by-bpm")
     if skip_existing:
         args.append("--skip-existing")
+    if skip_analyze:
+        args.append("--skip-analyze")
     if limit:
         args.extend(["--limit", str(limit)])
 
@@ -592,6 +597,8 @@ class SettingsPatch(BaseModel):
     sources: list[str] | None = None
     key_format: str | None = None
     bucket_by_bpm: bool | None = None
+    skip_existing: bool | None = None
+    skip_analyze: bool | None = None
     bpm_min: int | None = None
     bpm_max: int | None = None
     analysis_seconds: int | None = None
@@ -1353,8 +1360,9 @@ def api_migrate_keys(req: MigrateReq) -> dict[str, Any]:
 class JobReq(BaseModel):
     url: str
     sources: list[str] | None = None
-    bucket_by_bpm: bool = True
-    skip_existing: bool = True
+    bucket_by_bpm: bool | None = None
+    skip_existing: bool | None = None
+    skip_analyze: bool | None = None
     key_format: str | None = None
     limit: int = 0
 
@@ -1362,11 +1370,18 @@ class JobReq(BaseModel):
 @app.post("/api/jobs")
 def api_start_job(req: JobReq) -> dict[str, Any]:
     s = load_settings()
+    # Behavioral flags: request body wins if explicit, otherwise pull from
+    # persisted settings. Lets external callers override on a per-request basis
+    # while the dashboard simply submits the saved settings unchanged.
+    bucket = req.bucket_by_bpm if req.bucket_by_bpm is not None else s["bucket_by_bpm"]
+    skip_e = req.skip_existing if req.skip_existing is not None else s["skip_existing"]
+    skip_a = req.skip_analyze if req.skip_analyze is not None else s["skip_analyze"]
     job_id = _spawn_job(
         req.url,
         sources=req.sources or s["sources"],
-        bucket_by_bpm=req.bucket_by_bpm,
-        skip_existing=req.skip_existing,
+        bucket_by_bpm=bucket,
+        skip_existing=skip_e,
+        skip_analyze=skip_a,
         key_format=req.key_format or s["key_format"],
         limit=req.limit,
     )
