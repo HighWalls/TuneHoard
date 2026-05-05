@@ -1,0 +1,100 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller tunehoard.spec
+
+      - name: Rename binary
+        shell: pwsh
+        run: |
+          Move-Item -Path dist/TuneHoard.exe -Destination dist/TuneHoard-windows-x64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TuneHoard-windows-x64
+          path: dist/TuneHoard-windows-x64.exe
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller tunehoard.spec
+
+      - name: Rename and zip binary
+        run: |
+          mv dist/TuneHoard dist/TuneHoard-macos-x64
+          chmod +x dist/TuneHoard-macos-x64
+          cd dist && zip TuneHoard-macos-x64.zip TuneHoard-macos-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TuneHoard-macos-x64
+          path: dist/TuneHoard-macos-x64.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: TuneHoard-windows-x64
+          path: dist
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: TuneHoard-macos-x64
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/TuneHoard-windows-x64.exe
+            dist/TuneHoard-macos-x64.zip

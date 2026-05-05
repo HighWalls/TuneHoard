@@ -29,6 +29,10 @@ _os.environ.setdefault("OMP_NUM_THREADS", "1")
 _os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 del _os
 
+# Source-of-truth running version. Used by /api/version for upstream-update
+# checks and as the User-Agent for the GitHub releases probe.
+__version__ = "0.1.0"
+
 import csv
 import json
 import os
@@ -37,6 +41,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -47,8 +53,10 @@ from mutagen.id3 import ID3, ID3NoHeaderError
 _TOTAL_RE = re.compile(r"\((\d+)\s+tracks?\)")
 _DONE_RE = re.compile(r"^Done\.\s+(\d+)\s+new")
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+import spotipy
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -257,6 +265,11 @@ JOBS: dict[str, dict[str, Any]] = {}
 PROCS: dict[str, subprocess.Popen] = {}
 JOBS_LOCK = threading.Lock()
 
+# /api/version cache. 60-second TTL keeps a refresh-happy user from pounding
+# the GitHub API. Populated lazily on first hit.
+_VERSION_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
+_VERSION_CACHE_TTL = 60.0
+
 
 def _spawn_job(
     url: str,
@@ -419,7 +432,7 @@ def _spawn_job(
 # ──────────────────────────────────────────────────────────────────────
 # FastAPI app + endpoints.
 # ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="TuneHoard", version="0.1.0")
+app = FastAPI(title="TuneHoard", version=__version__)
 
 
 # ── Settings ──────────────────────────────────────────────────────────
@@ -1100,6 +1113,265 @@ def api_spotify_status() -> dict[str, Any]:
         "configured": has_creds,
         "authorized": has_creds and has_cache,
     }
+
+
+# ── Spotify: Liked Songs as a virtual playlist ────────────────────────
+@app.get("/api/spotify/liked")
+def api_spotify_liked() -> dict[str, Any]:
+    """Return the authenticated user's Liked Songs metadata as a playlist-
+    shaped object. The dashboard treats this as a virtual playlist; the
+    download flow will recognize the `spotify:liked` URL sentinel separately.
+    Only fetches the count (limit=1) — we don't need the full track list here."""
+    s = load_settings()
+    cache_path = PROJECT_ROOT / ".spotify_cache"
+    if not s["spotify_client_id"] or not s["spotify_client_secret"] or not cache_path.exists():
+        raise HTTPException(401, "spotify not authorized")
+    try:
+        sp = _spotify_client(s["spotify_client_id"], s["spotify_client_secret"])
+        result = sp.current_user_saved_tracks(limit=1)
+        total = int(result.get("total", 0)) if result else 0
+    except spotipy.SpotifyException as e:
+        # 401/403 → unauthorized. Anything else → upstream API failure.
+        status = getattr(e, "http_status", 0)
+        if status in (401, 403):
+            raise HTTPException(401, "spotify not authorized")
+        raise HTTPException(502, f"spotify api error: {e}")
+    except Exception as e:
+        raise HTTPException(502, f"spotify api error: {e}")
+    return {
+        "name": "Liked Songs",
+        "url": "spotify:liked",
+        "track_count": total,
+    }
+
+
+# ── Spotify: list user playlists ──────────────────────────────────────
+@app.get("/api/spotify/playlists")
+def api_spotify_playlists() -> dict[str, Any]:
+    """Return up to 200 of the authenticated user's playlists (saved + created).
+    Paginated 50 at a time (Spotify max page size). `owner` is the literal
+    'you' if the caller owns the playlist, else the owner's display name / id."""
+    s = load_settings()
+    cache_path = PROJECT_ROOT / ".spotify_cache"
+    if not s["spotify_client_id"] or not s["spotify_client_secret"] or not cache_path.exists():
+        raise HTTPException(401, "spotify not authorized")
+    try:
+        sp = _spotify_client(s["spotify_client_id"], s["spotify_client_secret"])
+        # Cache the user id so we don't call current_user() once per playlist.
+        me_id = sp.current_user().get("id", "")
+        playlists: list[dict[str, Any]] = []
+        for page in range(4):  # 4 pages × 50 = 200 cap
+            result = sp.current_user_playlists(limit=50, offset=page * 50)
+            items = (result or {}).get("items") or []
+            if not items:
+                break
+            for p in items:
+                if not p:
+                    continue
+                name = p.get("name")
+                if not name:
+                    continue  # skip null / empty names
+                owner = p.get("owner") or {}
+                owner_id = owner.get("id", "")
+                if owner_id and owner_id == me_id:
+                    owner_label = "you"
+                else:
+                    owner_label = owner.get("display_name") or owner_id or "unknown"
+                playlists.append({
+                    "name": name,
+                    "url": (p.get("external_urls") or {}).get("spotify", ""),
+                    "track_count": int(((p.get("tracks") or {}).get("total")) or 0),
+                    "owner": owner_label,
+                })
+            if not result.get("next"):
+                break
+    except spotipy.SpotifyException as e:
+        status = getattr(e, "http_status", 0)
+        if status in (401, 403):
+            raise HTTPException(401, "spotify not authorized")
+        raise HTTPException(502, f"spotify api error: {e}")
+    except Exception as e:
+        raise HTTPException(502, f"spotify api error: {e}")
+    return {"playlists": playlists}
+
+
+# ── Auto-update version check ─────────────────────────────────────────
+def _compare_semver(current: str, latest: str) -> bool:
+    """Return True if `latest > current` under naive 3-part-int semver.
+    Non-numeric / malformed parts coerce to 0 rather than raising — keeps
+    the endpoint from 500-ing on weird upstream tag names."""
+    def _parts(v: str) -> tuple[int, int, int]:
+        bits = v.split(".")
+        out = [0, 0, 0]
+        for i in range(min(3, len(bits))):
+            try:
+                out[i] = int(bits[i])
+            except (ValueError, TypeError):
+                out[i] = 0
+        return out[0], out[1], out[2]
+    return _parts(latest) > _parts(current)
+
+
+@app.get("/api/version")
+def api_get_version() -> dict[str, Any]:
+    """Compare running version against the latest GitHub release. Cached for
+    60s so a refresh-happy dashboard doesn't hammer the GitHub API. Never
+    raises — every failure mode (timeout, network, parse, rate-limit) returns
+    a structured payload with `checked: false` so the dashboard can show a
+    quiet "couldn't check" state instead of console errors."""
+    now = time.time()
+    cached = _VERSION_CACHE.get("value")
+    if cached and (now - _VERSION_CACHE.get("fetched_at", 0)) < _VERSION_CACHE_TTL:
+        return cached
+
+    payload: dict[str, Any] = {
+        "current": __version__,
+        "latest": None,
+        "update_available": False,
+        "release_url": None,
+        "checked": False,
+        "error": None,
+    }
+    url = "https://api.github.com/repos/HighWalls/TuneHoard/releases/latest"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"TuneHoard/{__version__}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tag = (data.get("tag_name") or "").strip()
+        latest = tag[1:] if tag.lower().startswith("v") else tag
+        if latest:
+            payload["latest"] = latest
+            payload["update_available"] = _compare_semver(__version__, latest)
+            payload["release_url"] = data.get("html_url") or None
+            payload["checked"] = True
+    except urllib.error.HTTPError as e:
+        payload["error"] = "rate limited" if e.code == 403 else "network error"
+    except (TimeoutError, urllib.error.URLError) as e:
+        # urllib raises URLError(reason=...) on socket timeout too.
+        reason = getattr(e, "reason", e)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            payload["error"] = "timeout"
+        else:
+            payload["error"] = "network error"
+    except (json.JSONDecodeError, ValueError):
+        payload["error"] = "network error"
+    except Exception:
+        payload["error"] = "network error"
+
+    _VERSION_CACHE["value"] = payload
+    _VERSION_CACHE["fetched_at"] = now
+    return payload
+
+
+# ── Audio preview streaming (with HTTP Range support) ─────────────────
+def _parse_range_header(header: str, file_size: int) -> tuple[int, int] | None:
+    """Parse an HTTP Range header like 'bytes=START-END' (END optional).
+    Returns (start, end) inclusive, or None if the header is malformed.
+    Clamps end to file_size-1 so a too-greedy client doesn't 416."""
+    if not header or not header.lower().startswith("bytes="):
+        return None
+    spec = header.split("=", 1)[1].strip()
+    # We only honour the first byte-range — multipart ranges aren't worth it
+    # for an HTML5 <audio> seek use case.
+    spec = spec.split(",", 1)[0].strip()
+    if "-" not in spec:
+        return None
+    start_str, end_str = spec.split("-", 1)
+    try:
+        if start_str == "" and end_str:
+            # Suffix range: last N bytes.
+            n = int(end_str)
+            if n <= 0:
+                return None
+            start = max(0, file_size - n)
+            end = file_size - 1
+        else:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+    except ValueError:
+        return None
+    if start < 0 or end < start or start >= file_size:
+        return None
+    end = min(end, file_size - 1)
+    return start, end
+
+
+@app.get("/api/audio/{track_id:path}")
+def api_get_audio(track_id: str, request: Request) -> Response:
+    """Stream a track's MP3 with HTTP Range support so HTML5 <audio> can seek.
+    `track_id:path` lets the route match IDs containing `:` (e.g. `scan:foo.mp3`)
+    and `/`; FastAPI URL-decodes the value before we see it, so we just hand
+    it straight to the existing CSV lookup helper."""
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(404, "library_dir not configured")
+    rows = _read_library()
+    row = _find_row(rows, track_id)
+    if row is None:
+        raise HTTPException(404, "track not found")
+    out_dir = Path(s["library_dir"])
+    by_name, all_paths = _disk_index(out_dir)
+    path = _find_disk_file(row, by_name, all_paths)
+    if path is None or not path.exists():
+        raise HTTPException(404, "MP3 file not found on disk")
+
+    file_size = path.stat().st_size
+    chunk_size = 64 * 1024
+    range_header = request.headers.get("range") or request.headers.get("Range") or ""
+    rng = _parse_range_header(range_header, file_size) if range_header else None
+
+    if rng is None:
+        # Full-file response. Still advertise Accept-Ranges so the player
+        # knows it CAN seek — a follow-up Range request will get 206'd.
+        def full_iter() -> Any:
+            with path.open("rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        }
+        return StreamingResponse(
+            full_iter(),
+            status_code=200,
+            headers=headers,
+            media_type="audio/mpeg",
+        )
+
+    start, end = rng
+    length = end - start + 1
+
+    def range_iter() -> Any:
+        with path.open("rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(length),
+    }
+    return StreamingResponse(
+        range_iter(),
+        status_code=206,
+        headers=headers,
+        media_type="audio/mpeg",
+    )
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:

@@ -58,7 +58,7 @@ def _spotify_client(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
-        scope="playlist-read-private playlist-read-collaborative",
+        scope="playlist-read-private playlist-read-collaborative user-library-read",
         cache_path=str(cache_path),
         open_browser=True,
     )
@@ -99,7 +99,7 @@ def get_playlist_tracks(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
-        scope="playlist-read-private playlist-read-collaborative",
+        scope="playlist-read-private playlist-read-collaborative user-library-read",
         cache_path=str(cache_path),
         open_browser=True,
     )

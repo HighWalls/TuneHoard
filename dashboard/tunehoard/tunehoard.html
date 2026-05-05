@@ -354,6 +354,19 @@ table.lib tbody tr{ cursor:pointer; }
 .track-title{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:8ch; }
 .track-source{ display:inline-block; width:5ch; text-align:right; }
 .track-row.dragging{ opacity:0.35; }
+.track-play{
+  display:inline-block;
+  width:3ch;
+  text-align:center;
+  cursor:pointer;
+  user-select:none;
+  font-family:var(--mono);
+  font-weight:700;
+}
+.track-play:hover{ background:var(--paper); color:var(--ink); }
+.track-row.sel .track-play:hover,
+.track-row:hover .track-play:hover{ background:var(--paper); color:var(--ink); }
+.track-play.playing{ font-weight:700; }
 
 .track-edit{
   padding:8px 12px 8px calc(12px + 6ch);
@@ -499,6 +512,28 @@ table.lib tbody tr{ cursor:pointer; }
 .welcome .field input{ flex:1; }
 .welcome .center{ text-align:center; margin-top:14px; }
 
+/* Spotify picker rows */
+.sp-pick-list{
+  border:1px solid var(--ink);
+  background:var(--paper);
+  max-height:60vh;
+  overflow:auto;
+  font-family:var(--mono);
+  font-size:13px;
+}
+.sp-pick-row{
+  padding:3px 10px;
+  cursor:pointer;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  border-bottom:1px dotted color-mix(in srgb, var(--ink) 30%, var(--paper));
+}
+.sp-pick-row:last-child{ border-bottom:0; }
+.sp-pick-row:hover{ background:var(--ink); color:var(--paper); }
+.sp-pick-row.liked{ font-weight:700; }
+.sp-pick-empty{ padding:14px; text-align:center; color:color-mix(in srgb, var(--ink) 55%, var(--paper)); }
+
 /* Visibility helper */
 .hidden{ display:none !important; }
 
@@ -559,6 +594,13 @@ hr.tilde::before{
 </head>
 <body>
 
+<!-- ============== UPDATE BANNER ============== -->
+<div id="update-banner" class="hidden" style="border:1px solid var(--ink); background:var(--paper); color:var(--ink); font-family:var(--mono); font-size:13px; padding:4px 10px; display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; white-space:nowrap; overflow:hidden;">
+  <span id="update-banner-text" style="flex:1; overflow:hidden; text-overflow:ellipsis;">==[ UPDATE AVAILABLE ]==</span>
+  <a class="tlink" id="update-banner-link" href="#" target="_blank" rel="noopener">[ open release ]</a>
+  <a class="tlink" id="update-banner-dismiss" title="dismiss">[ × ]</a>
+</div>
+
 <!-- ============== MAIN VIEW ============== -->
 <div id="main-view">
 
@@ -592,6 +634,7 @@ hr.tilde::before{
     <div class="box-body">
       <div class="url-row">
         <input id="url" type="text" placeholder="paste a Spotify, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
+        <button class="btn hidden" id="browse-spotify-btn">[ Browse Spotify ]</button>
         <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
       </div>
       <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
@@ -772,6 +815,9 @@ hr.tilde::before{
 </div><!-- /settings-view -->
 
 
+<!-- ============== HIDDEN AUDIO PLAYER ============== -->
+<audio id="audio-player" preload="none" style="display:none;"></audio>
+
 <!-- ============== WELCOME OVERLAY ============== -->
 <div id="welcome-overlay" class="overlay hidden">
   <div class="welcome">
@@ -922,6 +968,24 @@ let _previewCurrent = '';     // last-fetched URL so we don't refetch identical 
 
 function setStatus(){
   const u = $('#url').value;
+  // Client-side fast-path for the Spotify picker's pseudo-URLs (e.g.
+  // "spotify:liked"). The /api/preview endpoint doesn't recognize these,
+  // so render a label locally and skip the backend round-trip. A separate
+  // backend handler turns "spotify:liked" into a real download job.
+  const trimmed = (u || '').trim();
+  if(trimmed.toLowerCase().startsWith('spotify:')){
+    URL_STATUS.classList.remove('ok','err');
+    URL_STATUS.classList.add('ok');
+    if(trimmed.toLowerCase() === 'spotify:liked'){
+      URL_STATUS.textContent = 'Spotify: Liked Songs';
+    } else {
+      URL_STATUS.textContent = 'Spotify: ' + trimmed;
+    }
+    _previewCurrent = trimmed;
+    if(_previewTimer){ clearTimeout(_previewTimer); _previewTimer = null; }
+    if(_previewAbort){ _previewAbort.abort(); _previewAbort = null; }
+    return;
+  }
   const r = detectURL(u);
   URL_STATUS.classList.remove('ok','err');
   if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; return; }
@@ -1238,6 +1302,49 @@ let expandedTrack = new Set(); // track ids → edit form open
 let expandedBucket = new Set();// bucket names
 let lastSelectedId = null;     // anchor for shift-click range-select
 
+// ---------- audio preview ----------
+// Single global <audio> element drives all per-row play buttons. Only one
+// track plays at a time. The play button glyph (▶ / ❚❚) is rendered by
+// renderLib() based on `currentlyPlayingId`.
+let currentlyPlayingId = null;
+function togglePlay(id){
+  const audio = document.getElementById('audio-player');
+  if(!audio) return;
+  if(currentlyPlayingId === id && !audio.paused){
+    audio.pause();
+    currentlyPlayingId = null;
+    renderLib();
+    return;
+  }
+  // Switch source (or re-start) and play.
+  audio.pause();
+  audio.src = '/api/audio/' + encodeURIComponent(id);
+  currentlyPlayingId = id;
+  renderLib();
+  audio.play().catch(err => {
+    // Autoplay rejection / network 404 etc. — clear state and toast.
+    currentlyPlayingId = null;
+    renderLib();
+    if(typeof toast === 'function') toast('preview failed: ' + (err.message || 'playback error'));
+  });
+}
+(function wireAudioPlayer(){
+  const audio = document.getElementById('audio-player');
+  if(!audio) return;
+  // Reflect end-of-track / external pause back into the UI.
+  audio.addEventListener('ended', () => {
+    currentlyPlayingId = null;
+    renderLib();
+  });
+  audio.addEventListener('error', () => {
+    if(currentlyPlayingId !== null){
+      currentlyPlayingId = null;
+      renderLib();
+      if(typeof toast === 'function') toast('preview failed: could not load audio');
+    }
+  });
+})();
+
 // Normalize either Camelot ('8A') or musical ('Am') input into the canonical Camelot value.
 const KEY_TO_CAM = (function(){
   const m = {};
@@ -1346,9 +1453,11 @@ function renderLib(){
         const sel = selected.has(t.id) ? ' sel' : '';
         const mv = t.moved ? ' moved' : '';
         const flag = t.moved ? '!!' : '  ';
+        const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
+        const playGlyph = playing ? '❚❚' : '▶';
         html += `<div class="track-row${sel}${mv}" data-id="${t.id}">`
               + `<span class="track-moved-flag">${flag}</span>`
-              + `<span class="track-indent" style="width:3ch"></span>`
+              + `<span class="track-play${playing?' playing':''}" data-play="${t.id}" title="${playing?'pause':'play preview'}">${playGlyph}</span>`
               + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
               + `<span class="track-sep">·</span>`
               + `<span class="track-bpm">${pad3(t.bpm)}</span>`
@@ -1403,6 +1512,15 @@ tree.addEventListener('mouseover', e=>{
 });
 
 tree.addEventListener('click', e=>{
+  // play button takes precedence over row click — do not toggle edit/select
+  const playEl = e.target.closest('[data-play]');
+  if(playEl){
+    e.stopPropagation();
+    e.preventDefault();
+    const id = playEl.dataset.play;
+    if(typeof togglePlay === 'function') togglePlay(id);
+    return;
+  }
   // click in edit form: do not propagate to row toggle
   const editEl = e.target.closest('.track-edit');
   if(editEl){
@@ -1577,6 +1695,7 @@ tree.addEventListener('mousedown', e=>{
   const tRow = e.target.closest('.track-row');
   if(!tRow) return;
   if(e.target.closest('.track-edit')) return;
+  if(e.target.closest('[data-play]')) return;  // play button is its own click path
   const id = tRow.dataset.id;
   const sx = e.clientX, sy = e.clientY;
   let armed = true;
@@ -2332,6 +2451,9 @@ $('#w-continue').addEventListener('click', async ()=>{
     },
     async listJobs(){ return jfetch('/api/jobs'); },
     async getFailures(){ return jfetch('/api/failures'); },
+    async getVersion(){ return jfetch('/api/version'); },
+    async getLikedSongs(){ return jfetch('/api/spotify/liked'); },
+    async getMyPlaylists(){ return jfetch('/api/spotify/playlists'); },
     async refreshJobs(){
       try{
         const jobs = await API.listJobs();
@@ -2499,6 +2621,170 @@ $('#w-continue').addEventListener('click', async ()=>{
       catch(err){ toast('settings save failed: ' + err.message); }
     });
   });
+
+  // ---------- update banner ----------
+  // Polls /api/version once on load. Shows a dismissable banner above the
+  // header if a newer release is available. Dismissal is keyed to the
+  // version string so the next release re-prompts.
+  (async function checkForUpdate(){
+    const banner = document.getElementById('update-banner');
+    if(!banner) return;
+    const txt = document.getElementById('update-banner-text');
+    const link = document.getElementById('update-banner-link');
+    const dismiss = document.getElementById('update-banner-dismiss');
+    try{
+      const r = await API.getVersion();
+      if(!r || !r.checked || r.error || !r.update_available) return;
+      let dismissed = null;
+      try { dismissed = localStorage.getItem('tunehoard_dismissed_version'); } catch(e){}
+      if(dismissed && r.latest && dismissed === r.latest) return;
+      txt.textContent = `==[ UPDATE AVAILABLE: v${r.latest} ]==`;
+      if(r.release_url){
+        link.href = r.release_url;
+        link.classList.remove('hidden');
+      } else {
+        link.classList.add('hidden');
+      }
+      dismiss.addEventListener('click', e => {
+        e.preventDefault();
+        try { if(r.latest) localStorage.setItem('tunehoard_dismissed_version', r.latest); } catch(e){}
+        banner.classList.add('hidden');
+      });
+      banner.classList.remove('hidden');
+    } catch(err){
+      // silent — user doesn't care if the update check fails
+    }
+  })();
+
+  // ---------- Spotify browse picker ----------
+  // Toggles the [ Browse Spotify ] button visible only when the backend
+  // reports an authorized Spotify session. Refreshed on initial load and
+  // whenever spotifyStatus is checked elsewhere (e.g. after Authorize).
+  const _origRefreshSp = (typeof refreshSpotifyStatus === 'function') ? refreshSpotifyStatus : null;
+  async function syncSpotifyBrowseBtn(){
+    const btn = document.getElementById('browse-spotify-btn');
+    if(!btn) return;
+    try{
+      const s = await API.spotifyStatus();
+      if(s && s.authorized) btn.classList.remove('hidden');
+      else btn.classList.add('hidden');
+    } catch(err){
+      btn.classList.add('hidden');
+    }
+  }
+  syncSpotifyBrowseBtn();
+  // Re-check on focus (the user may authorize in another tab and tab back).
+  window.addEventListener('focus', syncSpotifyBrowseBtn);
+
+  function openSpotifyPicker(){
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const box = document.createElement('div');
+    box.className = 'welcome';
+    box.style.maxWidth = '640px';
+    box.style.width = '640px';
+    const h = document.createElement('h2');
+    h.textContent = '~~ BROWSE SPOTIFY ~~';
+    box.appendChild(h);
+    const rule = document.createElement('div');
+    rule.className = 'rule';
+    rule.textContent = '~~~~~~~~~~~~~~~~~~~~~~~~~';
+    box.appendChild(rule);
+    const list = document.createElement('div');
+    list.className = 'sp-pick-list';
+    list.innerHTML = '<div class="sp-pick-empty">loading…</div>';
+    box.appendChild(list);
+    const buttons = document.createElement('div');
+    buttons.style.display = 'flex';
+    buttons.style.justifyContent = 'flex-end';
+    buttons.style.marginTop = '14px';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn';
+    cancelBtn.textContent = '[ Cancel ]';
+    cancelBtn.addEventListener('click', () => close());
+    buttons.appendChild(cancelBtn);
+    box.appendChild(buttons);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    function close(){
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+    }
+    function onKey(e){
+      if(e.key === 'Escape'){ e.preventDefault(); close(); }
+    }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', e => { if(e.target === overlay) close(); });
+
+    function pick(url){
+      close();
+      const input = document.getElementById('url');
+      if(input){
+        input.value = url;
+        if(typeof setStatus === 'function') setStatus();
+      }
+    }
+
+    // Fetch both endpoints in parallel.
+    Promise.all([
+      API.getLikedSongs().catch(err => ({__err: err})),
+      API.getMyPlaylists().catch(err => ({__err: err})),
+    ]).then(([liked, pls]) => {
+      // 401 from either → close and prompt user.
+      const isAuthErr = e => e && e.__err && /401|not authoriz|unauth/i.test(e.__err.message || '');
+      if(isAuthErr(liked) || isAuthErr(pls)){
+        close();
+        showModal({
+          title: 'Not authorized',
+          body: 'Authorize Spotify in Settings first.',
+          ok: 'OK',
+        });
+        return;
+      }
+      if((liked && liked.__err) || (pls && pls.__err)){
+        close();
+        const err = (liked && liked.__err) || (pls && pls.__err);
+        toast('Spotify browse failed: ' + (err.message || 'unknown'));
+        return;
+      }
+
+      const rows = [];
+      if(liked && liked.url){
+        const tc = (typeof liked.track_count === 'number') ? liked.track_count : '?';
+        rows.push({
+          html: `★ ${escapeHtml(liked.name || 'Liked Songs')} (${tc} tracks)`,
+          url: liked.url,
+          cls: 'liked',
+        });
+      }
+      const playlists = (pls && Array.isArray(pls.playlists)) ? pls.playlists : [];
+      for(const p of playlists){
+        const tc = (typeof p.track_count === 'number') ? p.track_count : '?';
+        const owner = p.owner ? ` — ${escapeHtml(p.owner)}` : '';
+        rows.push({
+          html: `≫ ${escapeHtml(p.name || '(untitled)')} (${tc} tracks)${owner}`,
+          url: p.url,
+          cls: '',
+        });
+      }
+      if(rows.length === 0){
+        list.innerHTML = '<div class="sp-pick-empty">no playlists found</div>';
+        return;
+      }
+      list.innerHTML = rows.map((r, i) =>
+        `<div class="sp-pick-row ${r.cls}" data-idx="${i}">${r.html}</div>`
+      ).join('');
+      list.addEventListener('click', e => {
+        const row = e.target.closest('.sp-pick-row');
+        if(!row) return;
+        const idx = parseInt(row.dataset.idx, 10);
+        if(rows[idx]) pick(rows[idx].url);
+      });
+    });
+  }
+  const browseBtn = document.getElementById('browse-spotify-btn');
+  if(browseBtn) browseBtn.addEventListener('click', openSpotifyPicker);
 })();
 </script>
 
