@@ -30,7 +30,7 @@ list[Track]  (id, title, artists, album, duration_ms, isrc, source_url)
       │      else → append to failures list
 tmp_dir/<id>.mp3
       │
-      ▼  analyzer.analyze(mp3_path)   (loads first 120s @ 22050 Hz mono)
+      ▼  analyzer.analyze(mp3_path, bpm_min=85, bpm_max=200, duration=120)
 Analysis(bpm: int, key_name: str, camelot: str)
       │
       ▼  tagger.tag_file(...)
@@ -64,17 +64,18 @@ out_dir/failures.txt    (if any track matched no source)
 
 ### `downloader.py`
 
-Two entry points sharing yt-dlp configuration via `_base_opts(out_dir)`:
+Two entry points sharing yt-dlp configuration via `_base_opts(out_dir, ffmpeg_location="")`:
 
-- `download_url(url, out_dir) -> Path | None` — direct download from a known video/track URL. Used for YouTube/SoundCloud playlist entries where `Track.source_url` is set. No search.
-- `download_track(query, out_dir, source) -> Path | None` — search-based download. Used for Spotify entries (no direct URL available). Uses yt-dlp's `default_search` with `ytsearch1:` or `scsearch1:` (first result only). If you need more matches, change `1` → `N` and filter in Python.
+- `download_url(url, out_dir, ffmpeg_location="") -> Path | None` — direct download from a known video/track URL. Used for YouTube/SoundCloud playlist entries where `Track.source_url` is set. No search.
+- `download_track(query, out_dir, source, ffmpeg_location="") -> Path | None` — search-based download. Used for Spotify entries (no direct URL available). Uses yt-dlp's `default_search` with `ytsearch1:` or `scsearch1:` (first result only). If you need more matches, change `1` → `N` and filter in Python.
+- `ffmpeg_location` (when non-empty) is passed straight through as yt-dlp's `ffmpeg_location` opt — it accepts either a directory containing `ffmpeg(.exe)` or the full executable path. Empty string falls back to PATH lookup, the historical behavior. Threaded from `--ffmpeg-location` (CLI) / `settings["ffmpeg_path"]` (dashboard).
 - Both: postprocessor pins output to mp3 @ 320k. Changing to FLAC/M4A: swap `preferredcodec`. Rekordbox handles all three; mp3 is the most portable.
 - Output template `%(id)s.%(ext)s` — uses the platform's track ID so collisions are impossible within a source. Final rename happens in `main.py`.
 
 ### `analyzer.py`
 
-- `analyze(mp3_path) -> Analysis` — loads mono @ 22050 Hz, **first 120s only**. That's enough for stable BPM/chroma and keeps per-track analysis under ~3s.
-- `_detect_bpm`: `librosa.beat.beat_track` returns tempo in BPM. Half/double-time correction clamps to `[70, 180]` by doubling/halving. Genuine outliers (60 BPM ambient, 200 BPM DnB) will be misclassified — change the bounds in `analyzer.py` if the target genre needs it.
+- `analyze(mp3_path, *, bpm_min=85, bpm_max=200, duration=120) -> Analysis` — loads mono @ 22050 Hz, first `duration` seconds only. 120s is enough for stable BPM/chroma and keeps per-track analysis under ~3s; lowering it speeds up scans, raising it helps tracks with long atonal intros.
+- `_detect_bpm(y, sr, bpm_min, bpm_max)`: `librosa.beat.beat_track` returns tempo in BPM. Half/double-time correction clamps to `[bpm_min, bpm_max]` by doubling/halving. Default bounds `[85, 200]` are tuned for DJ libraries including D&B; bounds must satisfy `bpm_min * 2 ≤ bpm_max` (else the loop oscillates — see `docs/GOTCHAS.md`).
 - `_detect_key`: mean chroma over the track, then correlate against 12 rotations of Krumhansl-Schmuckler major + minor profiles. Highest correlation wins mode and root.
 - Algorithm ceiling is ~80–85% accurate. Common failures: tracks with strong V chord emphasis mis-classified as V instead of I, modal/atonal tracks, very bass-heavy tracks where chroma is dominated by harmonics.
 
@@ -96,6 +97,8 @@ Two entry points sharing yt-dlp configuration via `_base_opts(out_dir)`:
 
 - `--key-format {camelot,musical}` — primary format for **new downloads**. Process_track always uses it for both TKEY and the filename prefix. For existing files (reanalyze + bucket-sync), the format is detected per-file and preserved unless `--migrate-keys` is also set.
 - `--migrate-keys` — opt-in. Forces every existing file's TKEY tag and filename prefix to `--key-format` on the next sync/reanalyze. Without it, existing files keep whatever format they were originally tagged with even when `--key-format` differs.
+- `--bpm-min` / `--bpm-max` / `--analysis-seconds` — passed straight to `analyzer.analyze(..., bpm_min, bpm_max, duration)`. Threaded through both `process_track` (new downloads) and `reanalyze_rows` (re-runs over existing files), so `--reanalyze --bpm-min 70` will rewrite a library with the tighter bound applied.
+- `--ffmpeg-location PATH` — passed through `process_track` to `download_url` / `download_track` (and on into yt-dlp). Empty default = PATH lookup (the historical behavior).
 - `_classify_key_format(s)` / `_existing_tkey_format(mp3_path)` — read a file's current TKEY and classify it as `'camelot'` (matches `\d+[AB]`) or `'musical'` (matches `[A-G][#b]?m?`) or `None`. Used to decide whether to preserve or migrate.
 - `_key_prefix(camelot, key_name, key_format)` — single source of truth for the filename's leading chunk. Used in process_track, reanalyze_rows, and `_expected_filename`.
 - Bucket-sync's rename step treats *both* `_expected_filename(row, "camelot")` and `_expected_filename(row, "musical")` as valid names for a given row. It only renames if the current name matches neither (e.g., wrong BPM/artist after a CSV edit) or if `--migrate-keys` was passed. So toggling `--key-format` on a follow-up run does not cascade-rename existing files.
@@ -167,14 +170,15 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 | `PATCH /api/tracks/{id}` | Body `{bpm?, camelot?, key?}`. Updates the row, retags ID3, renames + re-buckets the file using existing `main.py` helpers. Atomic CSV write afterwards. |
 | `DELETE /api/tracks/{id}` | Removes the MP3 from disk + the row from the CSV. |
 | `POST /api/tracks/{id}/move` | Body `{to_bucket, new_bpm?}`. Drag-drop endpoint. If `new_bpm` is omitted, the server applies the same auto-pick rules as the dashboard's drag handler (half-time → double, double-time → half, else bucket midpoint). |
-| `POST /api/tracks/{id}/reanalyze` | Re-runs `analyzer.analyze()` on the file, updates row, retags. Preserves the file's existing TKEY format (Camelot vs musical) — does not migrate. |
+| `POST /api/tracks/{id}/reanalyze` | Re-runs `analyzer.analyze()` on the file with `bpm_min` / `bpm_max` / `duration` from settings, updates row, retags. Preserves the file's existing TKEY format (Camelot vs musical) — does not migrate. |
+| `GET /api/failures` | Reads `<library_dir>/failures.txt` and returns `[{artist, title, spotify_url}]`. Skips blank lines and `#` comments; lenient on malformed rows (puts the whole left-of-tab into `title` rather than crashing). Returns `[]` with HTTP 200 when `library_dir` is unset or `failures.txt` is missing — never 404s, so the dashboard can poll unconditionally. |
 | `POST /api/tracks/{id}/open-folder` | Resolves the track's MP3 path on disk, opens the parent folder in the OS file manager via `os.startfile` / `xdg-open` / `open`. |
 | `POST /api/buckets/{name}/open-folder` | Opens `<library_dir>/<name>/` in the OS file manager. |
 | `POST /api/migrate-keys` | Body `{key_format}`. Bulk: rewrites every file's TKEY + filename prefix to the requested format. Persists `key_format` as the new default in settings. |
-| `POST /api/spotify/authorize` | Triggers the spotipy OAuth flow synchronously. Opens `accounts.spotify.com` in the user's browser, blocks until they authorize, then verifies via `sp.current_user()`. Token cached to `.spotify_cache`. Returns `{status: "authorized", user}`. |
+| `POST /api/spotify/authorize` | Triggers the spotipy OAuth flow synchronously. Opens `accounts.spotify.com` in the user's browser, blocks until they authorize, then verifies via `sp.current_user()`. The verify call runs in a worker thread with a 5-minute `t.join` timeout — a stale OAuth tab returns HTTP 504 instead of hanging the request indefinitely. Token cached to `.spotify_cache`. Returns `{status: "authorized", user}`. |
 | `GET /api/spotify/status` | Lightweight check: `{configured: bool, authorized: bool}`. Doesn't validate the cached token over the network. |
 | `POST /api/browse` | Body `{mode: "directory"\|"file", title?, initial?}`. Pops a native tkinter folder/file picker. Used by the dashboard's `[Browse...]` buttons. tkinter dialog runs in the uvicorn worker thread (sync handler) — non-blocking for other endpoints. Returns `{path}` or `{path: null}` on cancel. |
-| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess with `--out=<library_dir.parent> --into=<library_dir.name>` so all downloads merge into the user's currently-viewed library. Popen handle stored in `PROCS` dict for cancel. Returns the new job's id + initial state. |
+| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess with `--out=<library_dir.parent> --into=<library_dir.name>` so all downloads merge into the user's currently-viewed library. Also threads `--bpm-min` / `--bpm-max` / `--analysis-seconds` from settings, plus `--ffmpeg-location` if `settings["ffmpeg_path"]` is non-empty. Popen handle stored in `PROCS` dict for cancel. Returns the new job's id + initial state. |
 | `GET /api/jobs` | All jobs. `log` is truncated to last 3 lines per entry (full log via `/api/jobs/{id}/log`). |
 | `GET /api/jobs/{id}` / `GET /api/jobs/{id}/log` | Full single-job state / full log tail (default 100 lines, override with `?tail=N`). |
 | `DELETE /api/jobs/{id}` | Cancel a running job. Marks status `cancelled`, calls `_kill_process_tree` (Windows: `taskkill /F /T /PID` so yt-dlp + ffmpeg children don't orphan; POSIX: `terminate` then `kill` after 2s), removes from JOBS. Runner thread guard prevents the `proc.wait()` exit from overwriting the cancelled status with `failed`. |
@@ -217,8 +221,8 @@ The user briefly sees mock data on first paint (~50 ms) before real data takes o
 
 Each interactive control fires a backend call after the local UI update succeeds (optimistic-update pattern). On backend failure, a `toast()` shows the error and the local state is rolled back where reasonable:
 
-- **URL bar** → `GET /api/preview?url=` (debounced 450 ms with `AbortController` to ignore stale responses while user keeps typing).
-- **Download button** → `POST /api/jobs` with the toggle-pill values (bucket / fallback / skip-existing).
+- **URL bar** → `GET /api/preview?url=` (debounced 450 ms with `AbortController` to ignore stale responses while user keeps typing). Also accepts drag-drop: `dragover` prevents default to allow the drop, `drop` reads `text/uri-list` (preferred — most browsers populate it for link drags) and falls back to `text/plain`, then re-fires preview detection.
+- **Download button** → first `GET /api/settings`; if `library_dir` is empty, `showModal({ok: 'Open Settings', cancel: 'Cancel'})` → either opens Settings or aborts. Happy path → `POST /api/jobs` with the toggle-pill values (bucket / fallback / skip-existing).
 - **Job `[X]` cancel** → `DELETE /api/jobs/{id}`. Optimistic local removal, server kills the subprocess tree.
 - **Drag-drop track row** → `POST /api/tracks/{id}/move`. On failure, the track is restored to its source bucket and the BPM reverted.
 - **Bucket-move bulk button** → inline `.ctx-menu`-styled bucket picker; click a bucket → loops `moveTrack` over selected ids.
@@ -250,6 +254,16 @@ A standalone IIFE at module load (`syncSettingsToDom`) calls `GET /api/settings`
 ### Selection vs editing are mutually exclusive
 
 Plain click on a track row → opens that row's inline edit form, closes any other open form, **clears multi-selection**. Shift/Ctrl-click → toggles selection only, **closes any open edit form**. This means the per-row edit form and the bulk-action bar are never on screen at the same time; users don't see redundant Re-analyze / Delete buttons fighting for attention. Implemented in the `tree.addEventListener('click', ...)` handler.
+
+A module-level `lastSelectedId` tracks the anchor for shift-click range select. Plain click and ctrl-click update the anchor; pure shift-range click does *not*, so subsequent shift-clicks keep extending from the same anchor (matches Finder/Explorer behavior). Range membership is computed in DOM order — a `querySelectorAll('.track-row')` walk picks up the bucket-grouped + within-bucket-sorted order the user actually sees, not the raw `LIB` array order.
+
+### Source filter
+
+The filter bar's `Scanned` radio matches tracks where `t.source === ""`. The backend's `_to_dashboard_track` produces an empty `source` for any value not in the `{spotify, youtube, soundcloud}` abbreviation map — the scan endpoint writes `"scanned"` into the CSV's `source` column, which `_to_dashboard_track` then collapses to `""`. So `Scanned` is exactly the catch-all for "not from a download job." The other three radios match the abbreviated `"SP" / "YT" / "SC"` strings.
+
+### Failures panel
+
+`<div id="failures-box">` lives between the jobs and library boxes. Hidden via `.hidden` class when the failure count is 0; otherwise shows `~~ FAILED TRACKS (N) ~~` and a list of `× artist — title  [open Spotify]` rows (literal U+00D7 cross, em dash, `.tlink` for the URL). Polls `GET /api/failures` on the same 30s timer that refreshes the library, plus on `window.focus`. Real-time accuracy isn't critical here — a job's failures show up once you tab back to the dashboard.
 
 ### Custom modal: `showModal({title, body, ok, cancel?, third?})`
 

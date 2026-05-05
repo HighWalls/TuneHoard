@@ -27,6 +27,10 @@ python main.py <url>
     [--reanalyze]                    # re-run BPM/key on existing MP3s (implies --skip-existing)
     [--key-format camelot|musical]   # TKEY + filename prefix for NEW downloads
     [--migrate-keys]                 # opt-in: also rewrite existing files to --key-format
+    [--bpm-min 85]                   # half/double-time clamp lower bound (sub-bound BPMs are doubled)
+    [--bpm-max 200]                  # half/double-time clamp upper bound (over-bound BPMs are halved)
+    [--analysis-seconds 120]         # seconds of audio loaded for BPM/key analysis
+    [--ffmpeg-location PATH]         # optional explicit ffmpeg path (else PATH lookup)
 ```
 
 `<url>` can be a playlist or single-track URL on Spotify, YouTube, or SoundCloud.
@@ -39,14 +43,16 @@ python server.py    # starts FastAPI at http://127.0.0.1:8765/, auto-opens brows
 
 Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.html` runs against `server.py`'s API and reads / writes the same `index.csv` files the CLI uses. Settings live in `.tunehoard_settings.json` (gitignored). The dashboard supports:
 
-- URL preview with real titles from the backend (debounced, abortable)
-- Download jobs with live progress / ETA, cancel kills the subprocess tree
-- Library tree with collapsible BPM buckets (empty buckets are hidden)
+- URL preview with real titles from the backend (debounced, abortable). URL bar accepts paste *and* drag-drop (text/uri-list or text/plain).
+- Download jobs with live progress / ETA, cancel kills the subprocess tree. First-run guard: if `library_dir` is unset, the Download button shows a modal pointing the user at Settings instead of letting the request 400.
+- Library tree with collapsible BPM buckets (empty buckets are hidden); shift-click extends a range from the last-clicked anchor (in DOM order), ctrl-click toggles individuals.
 - Inline edit form per track (Save / Re-analyze / Open in folder / Delete)
 - Drag-drop tracks between buckets (auto-picks half-time / double-time / midpoint BPM)
 - Bulk action bar on selected rows (Re-analyze / Delete / Move to bucket)
 - Right-click bucket → Open folder in Explorer / Re-analyze all in bucket / Expand–Collapse all
-- Settings page with native file pickers (tkinter), Spotify OAuth, source reorder
+- Source filter radios: All / Spotify / YouTube / SoundCloud / Scanned (matches `t.source === ""` for tracks indexed via Scan folder).
+- Failed-tracks panel between jobs and library (hidden when count = 0): lists `× artist — title  [open Spotify]` rows, polled from `GET /api/failures` on a 30s timer + on focus.
+- Settings page with native file pickers (tkinter), Spotify OAuth (with 5-min auth timeout), source reorder, advanced BPM clamp / analysis duration / ffmpeg path inputs.
 - Three-button "Scan folder" dialog for indexing pre-existing MP3 collections (read tags only / analyze missing via librosa / abort)
 - Manual "Migrate library" button to rewrite TKEY / filename to a new key format
 - Custom NFO-styled modal replaces native `confirm()` / `alert()`
@@ -86,10 +92,10 @@ Tracks that fail on every source are written to `failures.txt` alongside `index.
   This way the file is portable across any DJ software no matter the user's choice — every tool can find what it wants in *some* frame.
 - **Default target: Rekordbox.** `TKEY` defaults to Camelot (`"8A"`). `--key-format musical` writes `"Am"` for Traktor / Serato users. The CSV `index.csv` also keeps both `camelot` and `key` columns populated.
 - **Changing `--key-format` only affects NEW downloads.** Existing files keep their current TKEY format and filename prefix on subsequent syncs. To rewrite an entire library to the new format, pass `--migrate-keys` explicitly. The bucket-sync rename pass treats both `8A - 128 - …` and `Am - 128 - …` as valid filenames for the same row, so toggling `--key-format` on a re-run doesn't cascade-rename files.
-- **BPM is stored as int string in `TBPM`** (Rekordbox convention). The half/double-time normalizer in `analyzer.py` clamps to 70–180 BPM — this is intentional for DJ use, not a bug.
+- **BPM is stored as int string in `TBPM`** (Rekordbox convention). The half/double-time normalizer in `analyzer.py` defaults to clamping `[85, 200]` — intentional for DJ use, not a bug. Bounds are configurable via `--bpm-min` / `--bpm-max` (CLI) or the Settings → Advanced fields (dashboard); both halves of the bound are passed through to `analyze()` per call.
 - **Filename pattern:** `{camelot} - {bpm:03d} - {artist} - {title}.mp3`. Sorts nicely in file browsers and doubles as a visual fallback if tags get stripped.
 - **BPM bucketing (`--bucket-by-bpm`).** Anchor band is `115-125` (11 wide, DJ-idiomatic), everything else is 10-wide: `126-135`, `136-145`, ..., `105-114`, `95-104`, etc. No-BPM tracks go to `unknown-bpm/`. The bucket name is derived from BPM each time — rerunning with `--skip-existing --bucket-by-bpm` reorganizes existing files in place (and cleans empty folders), so the flag is safe to toggle on an already-downloaded playlist. **During the sync pass it also re-writes ID3 tags from the CSV row**, so manual edits to `index.csv` (e.g., fixing a wrong BPM) propagate into the file's tags + folder location on the next run.
-- **Fixing wrong BPMs.** Two workflows: (1) bulk auto-correct via `--reanalyze --bucket-by-bpm` (re-runs the improved detector on every existing MP3, updates tags + filenames + CSV + buckets); (2) surgical via editing `index.csv` then rerunning with `--skip-existing --bucket-by-bpm`. The detector uses `start_bpm=150` and clamps to `[85, 170]` to reduce half-time errors — genuine sub-85 BPM tracks (boom-bap) will get wrongly doubled and need the manual path.
+- **Fixing wrong BPMs.** Two workflows: (1) bulk auto-correct via `--reanalyze --bucket-by-bpm` (re-runs the improved detector on every existing MP3, updates tags + filenames + CSV + buckets); (2) surgical via editing `index.csv` then rerunning with `--skip-existing --bucket-by-bpm`. The detector uses `start_bpm=150` and clamps to `[85, 200]` by default to reduce half-time errors — genuine sub-85 BPM tracks (boom-bap) get wrongly doubled and need the manual path (or `--bpm-min 70` for that single run).
 - **OAuth user flow (not Client Credentials).** Spotify tightened Client Credentials access to `playlist_items` in 2025 — it now returns 401 even on public playlists. We use `SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative`. This reads both public and private playlists owned by OR accessible to the authenticated user. Editorial/algorithmic playlists (IDs starting `37i9dQZF1...`) still 404 — that's a separate access tier. **YouTube / SoundCloud URLs don't need any auth at all.**
 - **`spotify_id` column is a misnomer.** It's a generic primary key. Spotify tracks are raw Spotify IDs; YouTube entries are `"yt:<video_id>"`; SoundCloud are `"sc:<track_id>"`. Namespaced to prevent collisions across sources. Do not "clean up" by splitting into separate columns — it would break the existing `--skip-existing` dedup path.
 - **Local analysis only.** We do not call Spotify Audio Features or any paid BPM/key API. See `docs/GOTCHAS.md` for why.

@@ -86,7 +86,7 @@ The CLI `main.py` doesn't hit this because by the time librosa imports, the Pyth
 
 ## Settings file is per-user, gitignored
 
-`.tunehoard_settings.json` lives in the project root and holds `library_dir`, `output_dir`, `spotify_client_id`, `spotify_client_secret`, key format, and a few advanced values. It's in `.gitignore`. **The Spotify client secret is returned masked** (`********`) from `GET /api/settings`. The dashboard knows not to re-send the masked value — its `s-csec` blur handler skips PATCH if the field value is just asterisks. If you add a new endpoint or field that surfaces the secret, preserve this masking.
+`.tunehoard_settings.json` lives in the project root and holds `library_dir`, `spotify_client_id`, `spotify_client_secret`, `key_format`, `sources`, plus the advanced values `bpm_min` / `bpm_max` / `analysis_seconds` / `ffmpeg_path` (the last is empty by default and only added to yt-dlp's opts when set). It's in `.gitignore`. **The Spotify client secret is returned masked** (`********`) from `GET /api/settings`. The dashboard knows not to re-send the masked value — its `s-csec` blur handler skips PATCH if the field value is just asterisks. If you add a new endpoint or field that surfaces the secret, preserve this masking.
 
 `save_settings()` writes atomically (`.json.tmp` then `replace()`). The same atomic-write discipline applies as for `index.csv` — a crash mid-write can never corrupt the existing settings.
 
@@ -133,7 +133,9 @@ This is not the same as a true permission error (read-only file, ACL issue). Gen
 
 ## BPM clamping to [85, 200] + start_bpm=150 is intentional
 
-`analyzer.py:_detect_bpm()` passes `start_bpm=150` to librosa's beat tracker (overriding its default of 120) and clamps the result to `[85, 200]` — doubles anything under 85, halves anything over 200. Tuned for DJ electronic music including D&B and hardcore on the top end.
+`analyzer.py:_detect_bpm()` passes `start_bpm=150` to librosa's beat tracker (overriding its default of 120) and clamps the result to `[85, 200]` by default — doubles anything under 85, halves anything over 200. Tuned for DJ electronic music including D&B and hardcore on the top end.
+
+The bounds are now per-call kwargs (`bpm_min` / `bpm_max`) and configurable from the CLI (`--bpm-min` / `--bpm-max`) or dashboard Settings → Advanced. Defaults are unchanged. The non-overlap invariant below still has to hold for whatever bounds you pass — there is no validation for it.
 
 Why these specific numbers:
 
