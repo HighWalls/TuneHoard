@@ -35,15 +35,18 @@ __version__ = "0.1.0"
 
 import asyncio
 import csv
+import datetime as _dt
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -57,7 +60,7 @@ _DONE_RE = re.compile(r"^Done\.\s+(\d+)\s+new")
 import spotipy
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -66,6 +69,12 @@ from pydantic import BaseModel
 # ──────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# Default port; overridden at startup if 8765 is in use. The host-header
+# validation middleware reads this to whitelist `localhost:<port>` and
+# `127.0.0.1:<port>` for the ACTUAL bound port. Default-init to 8765 so
+# tests / standalone imports get a sane value before main() runs.
+_CHOSEN_PORT: int = 8765
 
 from analyzer import analyze
 from camelot import musical_key_short
@@ -266,6 +275,12 @@ JOBS: dict[str, dict[str, Any]] = {}
 PROCS: dict[str, subprocess.Popen] = {}
 JOBS_LOCK = threading.Lock()
 
+# Background scans (analyze_missing=true). Same record shape as JOBS so the
+# dashboard can poll/render with the same code path. Cancellation is best-
+# effort: we set a `cancelled` flag, and the worker checks between tracks.
+SCANS: dict[str, dict[str, Any]] = {}
+SCANS_LOCK = threading.Lock()
+
 # ── WebSocket push for /ws/jobs ───────────────────────────────────────
 # Connected clients receive a snapshot on connect, then incremental updates
 # whenever JOBS state changes. Polling on /api/jobs is preserved as a fallback.
@@ -317,6 +332,42 @@ def _broadcast_jobs() -> None:
                 # Best-effort: a dead socket will surface on the next receive_text
                 # in the handler and be removed there. Don't try to fix it here.
                 pass
+    except Exception:
+        pass
+
+
+def _scan_snapshot(scan: dict[str, Any]) -> dict[str, Any]:
+    """Trim a SCANS record for over-the-wire shipping. Drops internal-only
+    keys, truncates the log to the last 5 entries (full log isn't currently
+    queryable but capping keeps WS frames small)."""
+    out = {k: v for k, v in scan.items() if not k.startswith("_")}
+    log = out.get("log") or []
+    if isinstance(log, list):
+        out["log"] = log[-5:]
+    return out
+
+
+def _broadcast_scans() -> None:
+    """Push the current SCANS state to every /ws/jobs client. Wrapped in
+    {type: 'scan_update', scan: {...}} so the frontend distinguishes from
+    job updates. Sends one frame per scan (almost always 1, rarely 2)."""
+    try:
+        loop = _WS_LOOP
+        if loop is None:
+            return
+        with _WS_LOCK:
+            conns = list(_WS_JOBS_CONNECTIONS)
+        if not conns:
+            return
+        with SCANS_LOCK:
+            snaps = [_scan_snapshot(s) for s in SCANS.values()]
+        for snap in snaps:
+            payload = {"type": "scan_update", "scan": snap}
+            for ws in conns:
+                try:
+                    asyncio.run_coroutine_threadsafe(ws.send_json(payload), loop)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -501,6 +552,38 @@ def _spawn_job(
 app = FastAPI(title="TuneHoard", version=__version__)
 
 
+# ── Host header validation (DNS-rebinding guard) ──────────────────────
+# Localhost-only server. We don't issue CSRF tokens (overkill for a single-
+# user local dashboard) but we DO validate `Host:` on every mutating request
+# to defend against a malicious page resolving its own hostname to 127.0.0.1
+# and POSTing to us cross-origin. The middleware closes over `_CHOSEN_PORT`,
+# which is assigned by `find_free_port()` BEFORE uvicorn.run() — so by the
+# time any request arrives, the global is the actual bound port.
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def _host_header_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+    if request.method in _MUTATING_METHODS:
+        host_hdr = (request.headers.get("host") or "").strip().lower()
+        allowed = {
+            f"127.0.0.1:{_CHOSEN_PORT}",
+            f"localhost:{_CHOSEN_PORT}",
+            # Also allow the canonical 8765 forms regardless of fallback —
+            # some bookmarks / dashboards may still hit those even when we're
+            # bound elsewhere. (Belt-and-braces; harmless if _CHOSEN_PORT
+            # equals 8765.)
+            "127.0.0.1:8765",
+            "localhost:8765",
+        }
+        if host_hdr not in allowed:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": f"host header rejected: {host_hdr}"},
+            )
+    return await call_next(request)
+
+
 # ── Settings ──────────────────────────────────────────────────────────
 class SettingsPatch(BaseModel):
     library_dir: str | None = None
@@ -659,6 +742,71 @@ def api_get_failures() -> list[dict[str, Any]]:
     return out
 
 
+class FailureDismiss(BaseModel):
+    spotify_url: str
+
+
+@app.post("/api/failures/dismiss")
+def api_dismiss_failure(req: FailureDismiss) -> list[dict[str, Any]]:
+    """Remove one failure row (by exact URL match) from `<library_dir>/failures.txt`
+    and rewrite atomically. If removing the row leaves only header / comment
+    lines, deletes the file entirely so the dashboard's hidden-when-empty UI
+    stays accurate. Returns the updated failures list (same shape as
+    GET /api/failures)."""
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(404, "library_dir not configured")
+    fail_path = Path(s["library_dir"]) / "failures.txt"
+    if not fail_path.exists():
+        raise HTTPException(404, "failures.txt does not exist")
+
+    target = (req.spotify_url or "").strip()
+    if not target:
+        raise HTTPException(400, "spotify_url required")
+
+    try:
+        text = fail_path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(500, f"failed to read failures.txt: {e}")
+
+    kept_lines: list[str] = []
+    removed = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            kept_lines.append(raw)
+            continue
+        # The data-row format is "Artist - Title<TAB>URL". Match URL exactly.
+        url = line.split("\t", 1)[1].strip() if "\t" in line else ""
+        if not removed and url == target:
+            removed = True
+            continue
+        kept_lines.append(raw)
+
+    if not removed:
+        raise HTTPException(404, "not in failures.txt")
+
+    # If everything left is comments / blanks, just unlink the file. Otherwise
+    # atomic rewrite (.tmp → replace), same pattern as index.csv.
+    has_data = any(
+        ln.strip() and not ln.strip().startswith("#") for ln in kept_lines
+    )
+    if not has_data:
+        try:
+            fail_path.unlink()
+        except Exception as e:
+            raise HTTPException(500, f"failed to delete failures.txt: {e}")
+    else:
+        tmp = fail_path.with_suffix(".txt.tmp")
+        try:
+            tmp.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+            tmp.replace(fail_path)
+        except Exception as e:
+            raise HTTPException(500, f"failed to rewrite failures.txt: {e}")
+
+    return api_get_failures()
+
+
 def _short_musical_to_full(short: str) -> str:
     """'Am' -> 'A minor', 'C' -> 'C major', 'C#m' -> 'C# minor'.
     Inverse of camelot.musical_key_short(). Empty string for unrecognized."""
@@ -669,6 +817,232 @@ def _short_musical_to_full(short: str) -> str:
         return ""
     root, mode = m.group(1), m.group(2)
     return f"{root} {'minor' if mode else 'major'}"
+
+
+def _read_mp3_tags(mp3: Path) -> dict[str, str]:
+    """Pull TIT2/TPE1/TALB/TBPM/TKEY/TXXX:CAMELOT_KEY/TXXX:MUSICAL_KEY out of
+    one MP3. Returns a dict of strings (empty for absent fields). Lenient —
+    a corrupt header just means an empty dict, not a crash."""
+    try:
+        tags: ID3 | None = ID3(mp3)
+    except (ID3NoHeaderError, Exception):
+        tags = None
+
+    def get_text(frame_id: str) -> str:
+        if not tags or frame_id not in tags:
+            return ""
+        try:
+            return str(tags[frame_id].text[0])
+        except Exception:
+            return ""
+
+    return {
+        "title": get_text("TIT2"),
+        "artist": get_text("TPE1"),
+        "album": get_text("TALB"),
+        "bpm": get_text("TBPM"),
+        "tkey": get_text("TKEY"),
+        "camelot_txxx": get_text("TXXX:CAMELOT_KEY"),
+        "musical_txxx": get_text("TXXX:MUSICAL_KEY"),
+    }
+
+
+def _scan_one_mp3(
+    mp3: Path,
+    *,
+    read_bpm_key: bool,
+    analyze_missing: bool,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a fresh-row payload from one MP3, applying the chosen scan flags.
+    Caller merges this with any pre-existing CSV row (smart-fill semantics)."""
+    raw = _read_mp3_tags(mp3)
+    title = raw["title"] or mp3.stem
+    artist = raw["artist"]
+    album = raw["album"]
+
+    bpm: int | str = ""
+    camelot = ""
+    key_full = ""
+    if read_bpm_key:
+        bpm_str = raw["bpm"]
+        try:
+            bpm = int(bpm_str) if bpm_str else ""
+        except ValueError:
+            bpm = ""
+        # Camelot: prefer the dedicated TXXX frame TuneHoard writes,
+        # fall back to TKEY if its value parses as Camelot.
+        camelot = raw["camelot_txxx"]
+        if not camelot:
+            tkey = raw["tkey"]
+            if _classify_key_format(tkey) == "camelot":
+                camelot = tkey
+        # Musical key: prefer dedicated TXXX, fall back to TKEY if musical.
+        musical_short = raw["musical_txxx"]
+        if not musical_short:
+            tkey = raw["tkey"]
+            if _classify_key_format(tkey) == "musical":
+                musical_short = tkey
+        key_full = _short_musical_to_full(musical_short)
+
+    # If still missing BPM/Camelot AND user asked for analysis, run librosa.
+    if analyze_missing and (bpm == "" or not camelot):
+        try:
+            result = analyze(
+                mp3,
+                bpm_min=settings["bpm_min"],
+                bpm_max=settings["bpm_max"],
+                duration=settings["analysis_seconds"],
+            )
+            if bpm == "":
+                bpm = result.bpm
+            if not camelot:
+                camelot = result.camelot
+            if not key_full:
+                key_full = result.key_name
+        except Exception:
+            pass  # leave whatever we have; row still gets added
+
+    return {
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "bpm": bpm,
+        "camelot": camelot,
+        "key_full": key_full,
+    }
+
+
+def _merge_scan_row(
+    mp3: Path,
+    fresh: dict[str, Any],
+    existing: dict[str, Any] | None,
+) -> tuple[dict[str, Any], str]:
+    """Return (row, label) where label is 'added'|'kept'|'filled'. Smart-fill:
+    only blank existing fields get populated from `fresh`."""
+    if existing:
+        merged = dict(existing)
+        updated = False
+        if not (existing.get("bpm") or "").strip() and fresh["bpm"] != "":
+            merged["bpm"] = str(fresh["bpm"])
+            updated = True
+        if not (existing.get("camelot") or "").strip() and fresh["camelot"]:
+            merged["camelot"] = fresh["camelot"]
+            updated = True
+        if not (existing.get("key") or "").strip() and fresh["key_full"]:
+            merged["key"] = fresh["key_full"]
+            updated = True
+        return merged, ("filled" if updated else "kept")
+
+    new_row = {
+        "camelot": fresh["camelot"],
+        "bpm": str(fresh["bpm"]) if fresh["bpm"] != "" else "",
+        "artist": fresh["artist"],
+        "title": fresh["title"],
+        "album": fresh["album"],
+        "key": fresh["key_full"],
+        "source": "scanned",
+        "file": mp3.name,
+        "spotify_id": f"scan:{mp3.name}",
+    }
+    return new_row, "added"
+
+
+def _run_scan_thread(scan_id: str, read_bpm_key: bool, analyze_missing: bool) -> None:
+    """Worker thread for analyze_missing scans. Updates SCANS[scan_id] as it
+    iterates; checks the cancelled flag between tracks. Broadcasts state on
+    each track and on terminal status. The in-progress librosa call is NOT
+    interruptible, so cancellation is best-effort (current track finishes)."""
+    s = load_settings()
+    out_dir = Path(s["library_dir"]) if s.get("library_dir") else None
+
+    def _set(**kwargs: Any) -> None:
+        with SCANS_LOCK:
+            SCANS[scan_id].update(kwargs)
+
+    def _cancelled() -> bool:
+        with SCANS_LOCK:
+            return bool(SCANS[scan_id].get("cancelled"))
+
+    if out_dir is None or not out_dir.exists():
+        _set(
+            status="failed",
+            finished_at=time.time(),
+            error="library_dir not configured or missing",
+        )
+        _broadcast_scans()
+        return
+
+    try:
+        existing_rows = _read_library()
+        existing_by_file = {r.get("file"): r for r in existing_rows if r.get("file")}
+        mp3s = sorted(out_dir.rglob("*.mp3"))
+        total = len(mp3s)
+        _set(status="running", total=total, progress=0)
+        _broadcast_scans()
+
+        rows: list[dict[str, Any]] = []
+        added = 0
+        kept = 0
+        filled = 0
+        last_broadcast = 0.0
+        for idx, mp3 in enumerate(mp3s):
+            if _cancelled():
+                _set(status="cancelled", finished_at=time.time())
+                _broadcast_scans()
+                return
+
+            existing = existing_by_file.get(mp3.name)
+            if existing and not read_bpm_key:
+                rows.append(existing)
+                kept += 1
+            else:
+                fresh = _scan_one_mp3(
+                    mp3,
+                    read_bpm_key=read_bpm_key,
+                    analyze_missing=analyze_missing,
+                    settings=s,
+                )
+                merged, label = _merge_scan_row(mp3, fresh, existing)
+                rows.append(merged)
+                if label == "added":
+                    added += 1
+                elif label == "filled":
+                    filled += 1
+                else:
+                    kept += 1
+
+            with SCANS_LOCK:
+                SCANS[scan_id]["progress"] = idx + 1
+                SCANS[scan_id]["log"].append(f"{idx+1}/{total}: {mp3.name}")
+                if len(SCANS[scan_id]["log"]) > 500:
+                    SCANS[scan_id]["log"] = SCANS[scan_id]["log"][-300:]
+            now = time.time()
+            if now - last_broadcast >= 0.5:
+                last_broadcast = now
+                _broadcast_scans()
+
+        # One more cancellation check before the CSV write.
+        if _cancelled():
+            _set(status="cancelled", finished_at=time.time())
+            _broadcast_scans()
+            return
+
+        _write_library(rows)
+        _set(
+            status="done",
+            finished_at=time.time(),
+            total_rows=len(rows),
+            added=added,
+            kept=kept,
+            filled=filled,
+            csv=str(out_dir / "index.csv"),
+            progress=total,
+        )
+        _broadcast_scans()
+    except Exception as e:
+        _set(status="failed", finished_at=time.time(), error=str(e))
+        _broadcast_scans()
 
 
 @app.post("/api/library/scan")
@@ -685,11 +1059,11 @@ def api_scan_library(
     TXXX:MUSICAL_KEY out of the file's existing tags. Fast, trusts whatever
     the previous tagger wrote.
 
-    `analyze_missing=true` — implies read_bpm_key=true. AFTER reading tags,
-    for any track that still has no BPM AND no Camelot value, run librosa
-    `analyze()` to detect them. Slow (~3s per analyzed track) but populates
-    every track. Useful when scanning a folder that's a mix of pre-tagged
-    files and raw rips.
+    `analyze_missing=true` — implies read_bpm_key=true. RUNS IN BACKGROUND.
+    Returns {scan_id, status: 'queued'} immediately; poll /api/library/scan/{id}
+    or listen on /ws/jobs (scan_update messages). librosa analyze() takes
+    ~3s/track so a 200-track folder is ~10 minutes; we don't want to block
+    the HTTP request that long. Cancel with DELETE /api/library/scan/{id}.
 
     Merge-safe: existing rows are preserved; previously-unindexed MP3s get
     new rows; existing rows with blank BPM/key get filled in (never overwritten
@@ -706,14 +1080,31 @@ def api_scan_library(
     if not out_dir.exists():
         raise HTTPException(404, f"folder doesn't exist: {out_dir}")
 
-    # Merge-safe with smart fill:
-    #   • read_bpm_key=False → existing rows preserved as-is, new rows added with
-    #     blank BPM/Camelot. (Cancel branch.)
-    #   • read_bpm_key=True  → existing rows preserved, BUT blank BPM/Camelot/key
-    #     fields get filled in from tags (so re-scanning after a Cancel actually
-    #     does something useful). Non-blank values are NEVER overwritten — your
-    #     hand-edits and prior tag reads are safe.
-    # MP3 ID3 tags themselves are never modified by scan; we only read them.
+    # ── Background path: analyze_missing → kick off worker, return scan_id.
+    if analyze_missing:
+        scan_id = uuid.uuid4().hex[:9]
+        with SCANS_LOCK:
+            SCANS[scan_id] = {
+                "id": scan_id,
+                "status": "queued",
+                "progress": 0,
+                "total": 0,
+                "log": [],
+                "started_at": time.time(),
+                "finished_at": None,
+                "cancelled": False,
+                "read_bpm_key": read_bpm_key,
+                "analyze_missing": analyze_missing,
+            }
+        threading.Thread(
+            target=_run_scan_thread,
+            args=(scan_id, read_bpm_key, analyze_missing),
+            daemon=True,
+        ).start()
+        _broadcast_scans()
+        return {"scan_id": scan_id, "status": "queued"}
+
+    # ── Synchronous path: tags-only or read_bpm_key (fast).
     existing_rows = _read_library()
     existing_by_file = {r.get("file"): r for r in existing_rows if r.get("file")}
 
@@ -730,97 +1121,20 @@ def api_scan_library(
             kept += 1
             continue
 
-        try:
-            tags = ID3(mp3)
-        except (ID3NoHeaderError, Exception):
-            tags = None
-
-        def get_text(frame_id: str) -> str:
-            if not tags or frame_id not in tags:
-                return ""
-            try:
-                return str(tags[frame_id].text[0])
-            except Exception:
-                return ""
-
-        title = get_text("TIT2") or mp3.stem
-        artist = get_text("TPE1")
-        album = get_text("TALB")
-
-        bpm: int | str = ""
-        camelot = ""
-        key_full = ""
-        if read_bpm_key:
-            bpm_str = get_text("TBPM")
-            try:
-                bpm = int(bpm_str) if bpm_str else ""
-            except ValueError:
-                bpm = ""
-            # Camelot: prefer the dedicated TXXX frame TuneHoard writes,
-            # fall back to TKEY if its value parses as Camelot.
-            camelot = get_text("TXXX:CAMELOT_KEY")
-            if not camelot:
-                tkey = get_text("TKEY")
-                if _classify_key_format(tkey) == "camelot":
-                    camelot = tkey
-            # Musical key: prefer dedicated TXXX, fall back to TKEY if musical.
-            musical_short = get_text("TXXX:MUSICAL_KEY")
-            if not musical_short:
-                tkey = get_text("TKEY")
-                if _classify_key_format(tkey) == "musical":
-                    musical_short = tkey
-            key_full = _short_musical_to_full(musical_short)
-
-        # If still missing BPM/Camelot AND user asked for analysis, run librosa.
-        if analyze_missing and (bpm == "" or not camelot):
-            try:
-                result = analyze(
-                    mp3,
-                    bpm_min=s["bpm_min"],
-                    bpm_max=s["bpm_max"],
-                    duration=s["analysis_seconds"],
-                )
-                if bpm == "":
-                    bpm = result.bpm
-                if not camelot:
-                    camelot = result.camelot
-                if not key_full:
-                    key_full = result.key_name
-            except Exception:
-                pass  # leave whatever we have; row still gets added
-
-        if existing:
-            # Smart fill: copy existing row, only update fields that are blank.
-            merged = dict(existing)
-            updated = False
-            if not (existing.get("bpm") or "").strip() and bpm != "":
-                merged["bpm"] = str(bpm)
-                updated = True
-            if not (existing.get("camelot") or "").strip() and camelot:
-                merged["camelot"] = camelot
-                updated = True
-            if not (existing.get("key") or "").strip() and key_full:
-                merged["key"] = key_full
-                updated = True
-            rows.append(merged)
-            if updated:
-                filled += 1
-            else:
-                kept += 1
-            continue
-
-        rows.append({
-            "camelot": camelot,
-            "bpm": str(bpm) if bpm != "" else "",
-            "artist": artist,
-            "title": title,
-            "album": album,
-            "key": key_full,
-            "source": "scanned",
-            "file": mp3.name,
-            "spotify_id": f"scan:{mp3.name}",
-        })
-        added += 1
+        fresh = _scan_one_mp3(
+            mp3,
+            read_bpm_key=read_bpm_key,
+            analyze_missing=False,  # never run analysis on the sync path
+            settings=s,
+        )
+        merged, label = _merge_scan_row(mp3, fresh, existing)
+        rows.append(merged)
+        if label == "added":
+            added += 1
+        elif label == "filled":
+            filled += 1
+        else:
+            kept += 1
 
     _write_library(rows)
     return {
@@ -830,6 +1144,35 @@ def api_scan_library(
         "filled": filled,
         "csv": str(out_dir / "index.csv"),
     }
+
+
+@app.get("/api/library/scan/{scan_id}")
+def api_get_scan(scan_id: str) -> dict[str, Any]:
+    """Poll a background scan's progress. Returns the full record (including
+    any payload set by the worker on completion: total_rows, added, kept,
+    filled, csv)."""
+    with SCANS_LOCK:
+        if scan_id not in SCANS:
+            raise HTTPException(404, "scan not found")
+        return _scan_snapshot(SCANS[scan_id])
+
+
+@app.delete("/api/library/scan/{scan_id}")
+def api_cancel_scan(scan_id: str) -> dict[str, Any]:
+    """Best-effort cancel: sets a flag the worker checks between tracks. The
+    in-progress track's librosa call finishes (no way to interrupt it cleanly).
+    Status flips to 'cancelled' on the worker's next iteration."""
+    with SCANS_LOCK:
+        if scan_id not in SCANS:
+            raise HTTPException(404, "scan not found")
+        SCANS[scan_id]["cancelled"] = True
+        # If still queued (worker hasn't started its loop), mark cancelled now.
+        if SCANS[scan_id]["status"] == "queued":
+            SCANS[scan_id]["status"] = "cancelled"
+            SCANS[scan_id]["finished_at"] = time.time()
+        snap = _scan_snapshot(SCANS[scan_id])
+    _broadcast_scans()
+    return snap
 
 
 # ── Tracks ────────────────────────────────────────────────────────────
@@ -1187,15 +1530,57 @@ def api_spotify_authorize() -> dict[str, Any]:
 @app.get("/api/spotify/status")
 def api_spotify_status() -> dict[str, Any]:
     """Lightweight check: are creds set + is a token cached. Doesn't
-    re-validate the token (that would force a network round-trip)."""
+    re-validate the token (that would force a network round-trip).
+
+    Also surfaces scope mismatches: if the cached token's `scope` field
+    doesn't include `user-library-read` (added in 2026 for the Liked Songs
+    picker), set scope_mismatch=true. The frontend nudges the user to re-
+    auth. We do NOT auto-invalidate the cache — user decides when to refresh.
+
+    cache_age_days = days since the cache file's mtime (rounded down). Gives
+    the UI a hint for "this auth is months old, refresh might fail" copy.
+    """
     s = load_settings()
     cache_path = PROJECT_ROOT / ".spotify_cache"
     has_creds = bool(s["spotify_client_id"] and s["spotify_client_secret"])
     has_cache = cache_path.exists()
-    return {
+    authorized = has_creds and has_cache
+
+    out: dict[str, Any] = {
         "configured": has_creds,
-        "authorized": has_creds and has_cache,
+        "authorized": authorized,
+        "scope_mismatch": None,
+        "cache_age_days": None,
     }
+    if not authorized:
+        return out
+
+    # Cache age: floor(now - mtime, days). 0 for a freshly-minted cache.
+    try:
+        mtime = cache_path.stat().st_mtime
+        age_secs = max(0.0, time.time() - mtime)
+        out["cache_age_days"] = int(age_secs // 86400)
+    except Exception:
+        out["cache_age_days"] = None
+
+    # Scope detection: parse the cache JSON. Spotipy writes a "scope" field
+    # as a space-separated string (sometimes also as a list — handle both).
+    out["scope_mismatch"] = False  # default to "looks fine" once cached
+    try:
+        cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+        scope_field = cache_data.get("scope") or ""
+        if isinstance(scope_field, list):
+            scopes = {str(x).strip() for x in scope_field}
+        else:
+            scopes = {p for p in str(scope_field).split() if p}
+        if "user-library-read" not in scopes:
+            out["scope_mismatch"] = True
+    except Exception:
+        # Malformed cache: don't claim mismatch, but don't pretend it's fine
+        # either — leaving the field None signals "couldn't determine".
+        out["scope_mismatch"] = None
+
+    return out
 
 
 # ── Spotify: Liked Songs as a virtual playlist ────────────────────────
@@ -1314,6 +1699,7 @@ def api_get_version() -> dict[str, Any]:
         "release_url": None,
         "checked": False,
         "error": None,
+        "last_checked_at": None,
     }
     url = "https://api.github.com/repos/HighWalls/TuneHoard/releases/latest"
     req = urllib.request.Request(
@@ -1347,6 +1733,12 @@ def api_get_version() -> dict[str, Any]:
     except Exception:
         payload["error"] = "network error"
 
+    # Stamp last_checked_at on every cache write — successful or failed —
+    # so the dashboard can show "checked 2 minutes ago" even when GitHub
+    # rate-limited us. UTC, ISO 8601 with a trailing 'Z'.
+    payload["last_checked_at"] = (
+        _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
     _VERSION_CACHE["value"] = payload
     _VERSION_CACHE["fetched_at"] = now
     return payload
@@ -1526,6 +1918,18 @@ async def ws_jobs(ws: WebSocket) -> None:
     on first connect so that `_broadcast_jobs()` — called from the runner
     thread — can schedule sends back onto this loop."""
     global _WS_LOOP
+    # Host-header guard for WS upgrades. HTTP middleware doesn't fire on the
+    # websocket route, so we replicate the DNS-rebinding check here.
+    host_hdr = (ws.headers.get("host") or "").strip().lower()
+    allowed_hosts = {
+        f"127.0.0.1:{_CHOSEN_PORT}",
+        f"localhost:{_CHOSEN_PORT}",
+        "127.0.0.1:8765",
+        "localhost:8765",
+    }
+    if host_hdr not in allowed_hosts:
+        await ws.close(code=1008)  # 1008 = policy violation
+        return
     await ws.accept()
     # Capture the loop from this async context. `get_running_loop()` is the
     # robust call on Python 3.10+ — `get_event_loop()` is deprecated outside
@@ -1568,15 +1972,55 @@ if DASHBOARD_DIR.exists():
 # ──────────────────────────────────────────────────────────────────────
 # Launcher
 # ──────────────────────────────────────────────────────────────────────
+def find_free_port(host: str = "127.0.0.1", start: int = 8765, count: int = 5) -> int | None:
+    """Probe `count` consecutive ports starting at `start` for one we can bind.
+    Returns the first free port, or None if every probe fails. Used at startup
+    so a stale prior instance on 8765 doesn't crash boot with a confusing
+    OSError 10048; we transparently fall forward to 8766..8770 instead."""
+    for port in range(start, start + count):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((host, port))
+        except OSError:
+            continue
+        return port
+    return None
+
+
 def main() -> None:
     import uvicorn
 
+    global _CHOSEN_PORT
     host = "127.0.0.1"
-    port = int(os.environ.get("TUNEHOARD_PORT", "8765"))
+    # Honor TUNEHOARD_PORT if set (for users who pin a specific port). Otherwise
+    # walk 8765..8770 trying to bind.
+    env_port = os.environ.get("TUNEHOARD_PORT")
+    if env_port:
+        try:
+            start_port = int(env_port)
+        except ValueError:
+            start_port = 8765
+    else:
+        start_port = 8765
+
+    port = find_free_port(host=host, start=start_port, count=5)
+    if port is None:
+        end = start_port + 4
+        print(
+            f"  ERROR: ports {start_port}-{end} all in use; "
+            f"close another instance and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _CHOSEN_PORT = port
     url = f"http://{host}:{port}/"
 
     print()
     print(f"  TuneHoard server starting on {url}")
+    if port != start_port:
+        print(f"  (port {start_port} was in use; falling back to {port})")
     print(f"  Press Ctrl+C to stop.")
     print()
 

@@ -538,6 +538,141 @@ table.lib tbody tr{ cursor:pointer; }
 .sp-pick-row.liked{ font-weight:700; }
 .sp-pick-empty{ padding:14px; text-align:center; color:color-mix(in srgb, var(--ink) 55%, var(--paper)); }
 
+/* Spotify picker search input */
+.sp-pick-search{
+  display:flex;
+  margin-bottom:10px;
+  gap:8px;
+}
+.sp-pick-search input{
+  flex:1;
+  font-family:var(--mono);
+  font-size:13px;
+  background:var(--paper);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  padding:4px 8px;
+  outline:none;
+}
+.sp-pick-search input:focus{ background:var(--ink); color:var(--paper); }
+
+/* Scrub bar — inline progress for the playing track. Hard-edged, monospace. */
+.track-scrub{
+  display:inline-block;
+  width:8ch;
+  height:1em;
+  margin-right:1ch;
+  position:relative;
+  vertical-align:middle;
+  cursor:pointer;
+  border:1px solid var(--ink);
+  background:var(--paper);
+}
+.track-row.sel .track-scrub,
+.track-row:hover .track-scrub{ background:var(--paper); border-color:var(--paper); }
+.track-scrub-fill{
+  position:absolute;
+  top:0; bottom:0; left:0;
+  background:var(--ink);
+  pointer-events:none;
+}
+.track-row.sel .track-scrub-fill,
+.track-row:hover .track-scrub-fill{ background:var(--ink); }
+
+/* Now-playing pinned bar — sticky at bottom of viewport */
+.now-playing{
+  position:fixed;
+  left:0; right:0; bottom:0;
+  z-index:80;
+  background:var(--paper);
+  color:var(--ink);
+  border-top:1px solid var(--ink);
+  border-bottom:1px solid var(--ink);
+  padding:6px 14px;
+  font-family:var(--mono);
+  font-size:13px;
+  display:flex;
+  align-items:center;
+  gap:14px;
+  box-shadow:0 -2px 0 0 var(--ink);
+}
+.now-playing.hidden{ display:none !important; }
+.now-playing .np-glyph{ font-weight:700; }
+.now-playing .np-title{
+  flex:1;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  cursor:pointer;
+  text-decoration:underline;
+}
+.now-playing .np-title:hover{ background:var(--ink); color:var(--paper); }
+.now-playing .np-time{ font-variant-numeric: tabular-nums; }
+.now-playing .np-vol-wrap{ display:flex; align-items:center; gap:6px; }
+.now-playing .np-vol{
+  -webkit-appearance:none;
+  appearance:none;
+  width:80px;
+  height:10px;
+  background:var(--paper);
+  border:1px solid var(--ink);
+  cursor:pointer;
+  margin:0;
+  padding:0;
+}
+.now-playing .np-vol::-webkit-slider-runnable-track{
+  height:8px; background:var(--paper); border:0;
+}
+.now-playing .np-vol::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none;
+  width:10px; height:10px;
+  background:var(--ink);
+  border:0;
+  cursor:pointer;
+}
+.now-playing .np-vol::-moz-range-track{
+  height:8px; background:var(--paper); border:0;
+}
+.now-playing .np-vol::-moz-range-thumb{
+  width:10px; height:10px;
+  background:var(--ink);
+  border:0;
+  cursor:pointer;
+}
+/* Reserve bottom padding when now-playing is visible so it can't hide content */
+body.has-now-playing{ padding-bottom:56px; }
+
+/* Settings — small status hints */
+.settings-hint{
+  font-family:var(--mono);
+  font-size:12px;
+  margin-top:4px;
+  color:var(--ink);
+  opacity:0.75;
+}
+.settings-hint.warn{ opacity:1; font-weight:600; }
+
+/* Job log: expanded full-log pane */
+.log-pane.full{
+  height:auto;
+  max-height:300px;
+  overflow:auto;
+}
+.log-pane-toolbar{
+  display:flex;
+  gap:14px;
+  align-items:center;
+  margin-top:8px;
+  font-size:12px;
+  user-select:none;
+}
+.log-pane-toolbar .log-filter{ cursor:pointer; }
+.log-pane-toolbar .log-filter.on{ font-weight:700; }
+.log-pane-toolbar .spacer{ flex:1; }
+
+/* Failures row layout */
+.failure-row .fail-actions{ display:inline-flex; gap:10px; }
+
 /* Visibility helper */
 .hidden{ display:none !important; }
 
@@ -761,6 +896,12 @@ hr.tilde::before{
       <span style="flex:1;"></span>
       <button class="btn" id="s-auth">[ Authorize ]</button>
     </div>
+    <!-- F1/F2: scope-mismatch nudge + cache age display. Populated by
+         refreshSpotifyStatus(); empty by default. -->
+    <div class="settings-hint hidden" id="s-scope-warn">
+      ( i ) Permissions out of date — <a class="tlink" id="s-reauth">re-authorize</a> to enable Liked Songs picker.
+    </div>
+    <div class="settings-hint hidden" id="s-cache-age"></div>
   </div>
 
   <div class="fset">
@@ -811,6 +952,9 @@ hr.tilde::before{
     </div>
   </div>
 
+  <!-- F3: tiny update-check status. Populated by checkForUpdate(). -->
+  <div class="settings-hint" id="s-update-check" style="margin-top:14px; text-align:center;">Update check: …</div>
+
   <div class="footer">
     <div>TuneHoard v0.1 · github.com/HighWalls/TuneHoard</div>
     <div class="rule"></div>
@@ -821,6 +965,20 @@ hr.tilde::before{
 
 <!-- ============== HIDDEN AUDIO PLAYER ============== -->
 <audio id="audio-player" preload="none" style="display:none;"></audio>
+
+<!-- ============== NOW PLAYING BAR ============== -->
+<!-- Pinned at bottom of viewport while playback is active. Non-blocking
+     (z-index below modals). Click title → scrolls the row into view. -->
+<div id="now-playing" class="now-playing hidden">
+  <span class="np-glyph">&#9654;</span>
+  <span class="np-title" id="np-title" title="scroll to playing track">artist — title</span>
+  <span class="np-time" id="np-time">0:00 / 0:00</span>
+  <button class="btn tiny" id="np-stop" title="stop playback (Esc)">[ &#9633; stop ]</button>
+  <span class="np-vol-wrap" title="volume (persists)">
+    <span>vol</span>
+    <input type="range" min="0" max="100" step="1" value="70" id="np-vol" class="np-vol">
+  </span>
+</div>
 
 <!-- ============== WELCOME OVERLAY ============== -->
 <div id="welcome-overlay" class="overlay hidden">
@@ -981,7 +1139,11 @@ function setStatus(){
     URL_STATUS.classList.remove('ok','err');
     URL_STATUS.classList.add('ok');
     if(trimmed.toLowerCase() === 'spotify:liked'){
-      URL_STATUS.textContent = 'Spotify: Liked Songs';
+      // B3: display the cached track count if available.
+      const n = (typeof window._likedSongsCount === 'number') ? window._likedSongsCount : null;
+      URL_STATUS.textContent = n !== null
+        ? `Spotify: Liked Songs — ${n} tracks`
+        : 'Spotify: Liked Songs';
     } else {
       URL_STATUS.textContent = 'Spotify: ' + trimmed;
     }
@@ -1124,6 +1286,37 @@ function fmtETA(s){
   return (m? m+'m ' : '') + r + 's';
 }
 
+// D1: per-job full-log cache. Fetched once per session per job when the user
+// expands. Stored as the joined string (lines collapsed) so D2's regex filters
+// can run cheaply on every render.
+//   {[jobId]: {lines: string[], fetchedAt: number}}
+const LOG_CACHE = {};
+// D2: per-job log filter — 'all' | 'warn' | 'error'.
+const LOG_FILTERS = {};
+function _logLineMatches(line, filter){
+  if(filter === 'warn') return /warn(ing)?/i.test(line);
+  if(filter === 'error') return /(error|failed|traceback)/i.test(line) || /^\s*!/.test(line);
+  return true;
+}
+async function _fetchFullLog(id){
+  if(LOG_CACHE[id] && LOG_CACHE[id].lines) return LOG_CACHE[id];
+  try{
+    const r = await fetch(`/api/jobs/${encodeURIComponent(id)}/log?tail=500`,
+      {headers:{'Content-Type':'application/json'}});
+    if(!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    let lines;
+    if(Array.isArray(data)) lines = data;
+    else if(data && Array.isArray(data.log)) lines = data.log;
+    else if(typeof data === 'string') lines = data.split(/\r?\n/);
+    else lines = [];
+    LOG_CACHE[id] = {lines, fetchedAt: Date.now()};
+    return LOG_CACHE[id];
+  } catch(err){
+    return null;
+  }
+}
+
 function renderJobs(){
   const box = $('#jobs-box');
   const label = $('#jobs-label');
@@ -1151,13 +1344,35 @@ function renderJobs(){
   toggle.textContent = '[Collapse]';
   body.classList.remove('hidden');
 
-  body.innerHTML = JOBS.map(j => `
+  body.innerHTML = JOBS.map(j => {
+    let logHtml = '';
+    if(j.logOpen){
+      // D1/D2/D3: prefer full cached log (loaded on expand) over the
+      // truncated tail in the JOBS state. Filter is per-job, default 'all'.
+      const cache = LOG_CACHE[j.id];
+      const filter = LOG_FILTERS[j.id] || 'all';
+      const lines = cache && cache.lines ? cache.lines : (j.log || []);
+      const filtered = lines.filter(l => _logLineMatches(l, filter));
+      const text = filtered.length ? filtered.join('\n') : '(no matching lines)';
+      function rb(name, label){
+        const on = filter === name;
+        return `<span class="log-filter${on?' on':''}" data-log-filter="${name}">${on?'(•)':'( )'} ${label}</span>`;
+      }
+      logHtml =
+        `<div class="log-pane-toolbar">`
+        +   rb('all', 'all') + rb('warn', 'warnings') + rb('error', 'errors')
+        +   `<span class="spacer"></span>`
+        +   `<a class="tlink" data-log-copy="1">[ copy ]</a>`
+        + `</div>`
+        + `<pre class="log-pane full" data-log-pane="1">${escapeHtml(text)}</pre>`;
+    }
+    return `
     <div class="job" data-id="${j.id}">
       <div class="job-head">
         <span class="job-title">${j.source} · ${j.name}</span>
         <span class="job-actions">
           <button class="btn tiny" data-act="cancel">[X]</button>
-          <button class="btn tiny" data-act="log">[Log]</button>
+          <button class="btn tiny" data-act="log">[${j.logOpen ? 'Hide log' : 'Expand log'}]</button>
         </span>
       </div>
       <div class="bar-line"><span class="bar">${bar(j.done,j.total)}</span></div>
@@ -1166,9 +1381,9 @@ function renderJobs(){
         <span>Failed: ${j.failed}</span>
       </div>
       <div class="job-current">${j.current}<span class="blink">_</span></div>
-      ${j.logOpen ? `<pre class="log-pane">${j.log.join('\n')}</pre>` : ''}
+      ${logHtml}
     </div>
-  `).join('');
+  `;}).join('');
 
   $$('.job', body).forEach(el=>{
     const id = el.dataset.id;
@@ -1192,7 +1407,52 @@ function renderJobs(){
         toast('cancel failed: ' + err.message);
       }
     });
-    el.querySelector('[data-act="log"]').addEventListener('click', ()=>{ job.logOpen = !job.logOpen; renderJobs(); });
+    el.querySelector('[data-act="log"]').addEventListener('click', async ()=>{
+      job.logOpen = !job.logOpen;
+      renderJobs();
+      // D1: lazy-fetch the full log on first expand. Cached in LOG_CACHE so
+      // re-expand / filter changes don't re-hit the network.
+      if(job.logOpen && !LOG_CACHE[id]){
+        await _fetchFullLog(id);
+        renderJobs();
+      }
+    });
+    // D2: filter radios.
+    el.querySelectorAll('[data-log-filter]').forEach(node=>{
+      node.addEventListener('click', () => {
+        LOG_FILTERS[id] = node.dataset.logFilter;
+        renderJobs();
+      });
+    });
+    // D3: copy log to clipboard. Always copies the full cached log
+    // (unfiltered) — copying a filtered subset is rarely what users want.
+    const copyLink = el.querySelector('[data-log-copy]');
+    if(copyLink){
+      copyLink.addEventListener('click', async () => {
+        const cache = LOG_CACHE[id];
+        const lines = cache && cache.lines ? cache.lines : (job.log || []);
+        const text = lines.join('\n');
+        try{
+          await navigator.clipboard.writeText(text);
+          toast('log copied');
+        } catch(err){
+          // Older browsers / restricted contexts — fall back to a temporary
+          // textarea + execCommand.
+          try{
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed'; ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+            toast('log copied');
+          } catch(e2){
+            toast('copy failed: ' + (err.message || 'unknown'));
+          }
+        }
+      });
+    }
   });
 }
 $('#jobs-toggle').addEventListener('click', ()=>{ jobsCollapsed = !jobsCollapsed; renderJobs(); });
@@ -1311,6 +1571,28 @@ let lastSelectedId = null;     // anchor for shift-click range-select
 // track plays at a time. The play button glyph (▶ / ❚❚) is rendered by
 // renderLib() based on `currentlyPlayingId`.
 let currentlyPlayingId = null;
+
+// Persisted volume — restored on load, written back on slider change.
+function _loadVolume(){
+  try{
+    const raw = localStorage.getItem('tunehoard_volume');
+    if(raw === null) return 0.7;
+    const v = parseFloat(raw);
+    if(isNaN(v) || v < 0 || v > 1) return 0.7;
+    return v;
+  } catch(e){ return 0.7; }
+}
+function _saveVolume(v){
+  try{ localStorage.setItem('tunehoard_volume', String(v)); } catch(e){}
+}
+
+// Format seconds → "M:SS"
+function fmtTime(s){
+  if(!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s/60), r = Math.floor(s%60);
+  return m + ':' + (r<10 ? '0' : '') + r;
+}
+
 function togglePlay(id){
   const audio = document.getElementById('audio-player');
   if(!audio) return;
@@ -1318,6 +1600,7 @@ function togglePlay(id){
     audio.pause();
     currentlyPlayingId = null;
     renderLib();
+    updateNowPlaying();
     return;
   }
   // Switch source (or re-start) and play.
@@ -1325,26 +1608,151 @@ function togglePlay(id){
   audio.src = '/api/audio/' + encodeURIComponent(id);
   currentlyPlayingId = id;
   renderLib();
-  audio.play().catch(err => {
+  audio.play().then(() => updateNowPlaying()).catch(err => {
     // Autoplay rejection / network 404 etc. — clear state and toast.
     currentlyPlayingId = null;
     renderLib();
+    updateNowPlaying();
     if(typeof toast === 'function') toast('preview failed: ' + (err.message || 'playback error'));
   });
 }
+
+// Update the pinned "now playing" bar's title + show/hide. The scrub bars
+// inside .track-row are updated by a separate timeupdate handler that pokes
+// only the DOM (no full renderLib() — would steal focus and flicker).
+function updateNowPlaying(){
+  const bar = document.getElementById('now-playing');
+  const audio = document.getElementById('audio-player');
+  if(!bar || !audio) return;
+  const playing = currentlyPlayingId !== null && !audio.paused;
+  if(!playing){
+    bar.classList.add('hidden');
+    document.body.classList.remove('has-now-playing');
+    return;
+  }
+  bar.classList.remove('hidden');
+  document.body.classList.add('has-now-playing');
+  const t = (typeof LIB !== 'undefined') ? LIB.find(x => x.id === currentlyPlayingId) : null;
+  const titleEl = document.getElementById('np-title');
+  if(titleEl){
+    if(t) titleEl.textContent = (t.artist || '') + ' — ' + (t.title || '');
+    else titleEl.textContent = '(unknown track)';
+  }
+}
+
+// Update the inline scrub fill on the playing row (if any) without re-rendering.
+function updateScrubFill(){
+  const audio = document.getElementById('audio-player');
+  if(!audio || currentlyPlayingId === null) return;
+  const dur = audio.duration;
+  if(!isFinite(dur) || dur <= 0) return;
+  const pct = Math.max(0, Math.min(1, audio.currentTime / dur));
+  // Per-row scrub
+  const fill = document.querySelector(`.track-row[data-id="${currentlyPlayingId}"] .track-scrub-fill`);
+  if(fill) fill.style.width = (pct * 100) + '%';
+  // Now-playing time readout
+  const tEl = document.getElementById('np-time');
+  if(tEl) tEl.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(dur);
+}
+
 (function wireAudioPlayer(){
   const audio = document.getElementById('audio-player');
   if(!audio) return;
+  // Initial volume from localStorage.
+  audio.volume = _loadVolume();
   // Reflect end-of-track / external pause back into the UI.
   audio.addEventListener('ended', () => {
     currentlyPlayingId = null;
     renderLib();
+    updateNowPlaying();
   });
   audio.addEventListener('error', () => {
     if(currentlyPlayingId !== null){
       currentlyPlayingId = null;
       renderLib();
+      updateNowPlaying();
       if(typeof toast === 'function') toast('preview failed: could not load audio');
+    }
+  });
+  audio.addEventListener('pause', () => {
+    // Pause from any source (button, keyboard, etc.). Hide now-playing bar.
+    updateNowPlaying();
+  });
+  audio.addEventListener('play', updateNowPlaying);
+  audio.addEventListener('timeupdate', updateScrubFill);
+  audio.addEventListener('loadedmetadata', updateScrubFill);
+
+  // Wire the now-playing bar controls.
+  const stopBtn = document.getElementById('np-stop');
+  if(stopBtn){
+    stopBtn.addEventListener('click', () => {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      currentlyPlayingId = null;
+      renderLib();
+      updateNowPlaying();
+    });
+  }
+  const volSlider = document.getElementById('np-vol');
+  if(volSlider){
+    volSlider.value = String(Math.round(audio.volume * 100));
+    volSlider.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(1, parseInt(volSlider.value, 10) / 100));
+      audio.volume = v;
+      _saveVolume(v);
+    });
+  }
+  const titleEl = document.getElementById('np-title');
+  if(titleEl){
+    titleEl.addEventListener('click', () => {
+      if(currentlyPlayingId === null) return;
+      const row = document.querySelector(`.track-row[data-id="${currentlyPlayingId}"]`);
+      if(row && row.scrollIntoView) row.scrollIntoView({block:'center', behavior:'auto'});
+    });
+  }
+
+  // ---------- A4: keyboard shortcuts ----------
+  // Space toggle, Left/Right seek ±5s, Esc stop. Skip when focused inside an
+  // input/textarea/select or a contenteditable region.
+  function isTypingTarget(t){
+    if(!t) return false;
+    if(t.isContentEditable) return true;
+    const tag = t.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  }
+  document.addEventListener('keydown', e => {
+    if(isTypingTarget(e.target)) return;
+    // Don't fight modifiers / OS shortcuts.
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    if(e.key === ' ' || e.code === 'Space'){
+      if(currentlyPlayingId === null) return;
+      e.preventDefault();
+      if(audio.paused) audio.play().catch(()=>{});
+      else audio.pause();
+    } else if(e.key === 'ArrowLeft'){
+      if(currentlyPlayingId === null) return;
+      e.preventDefault();
+      audio.currentTime = Math.max(0, audio.currentTime - 5);
+      updateScrubFill();
+    } else if(e.key === 'ArrowRight'){
+      if(currentlyPlayingId === null) return;
+      e.preventDefault();
+      const dur = audio.duration;
+      const target = audio.currentTime + 5;
+      audio.currentTime = isFinite(dur) ? Math.min(dur, target) : target;
+      updateScrubFill();
+    } else if(e.key === 'Escape'){
+      // Esc only stops if currently playing. Other Esc handlers (modal close,
+      // ctx-menu close) handle their cases first; this fires last.
+      if(currentlyPlayingId !== null && !audio.paused){
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+        currentlyPlayingId = null;
+        renderLib();
+        updateNowPlaying();
+      }
     }
   });
 })();
@@ -1459,9 +1867,15 @@ function renderLib(){
         const flag = t.moved ? '!!' : '  ';
         const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
         const playGlyph = playing ? '❚❚' : '▶';
+        // A1: inline scrub bar — only on the currently-playing row. Reserves
+        // visual space without animating layout when the row stops playing.
+        const scrubMarkup = playing
+          ? `<span class="track-scrub" data-scrub="${t.id}" title="seek"><span class="track-scrub-fill"></span></span>`
+          : '';
         html += `<div class="track-row${sel}${mv}" data-id="${t.id}">`
               + `<span class="track-moved-flag">${flag}</span>`
               + `<span class="track-play${playing?' playing':''}" data-play="${t.id}" title="${playing?'pause':'play preview'}">${playGlyph}</span>`
+              + scrubMarkup
               + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
               + `<span class="track-sep">·</span>`
               + `<span class="track-bpm">${pad3(t.bpm)}</span>`
@@ -1523,6 +1937,20 @@ tree.addEventListener('click', e=>{
     e.preventDefault();
     const id = playEl.dataset.play;
     if(typeof togglePlay === 'function') togglePlay(id);
+    return;
+  }
+  // A1: scrub bar click → seek. Don't propagate to row select/edit.
+  const scrubEl = e.target.closest('[data-scrub]');
+  if(scrubEl){
+    e.stopPropagation();
+    e.preventDefault();
+    const audio = document.getElementById('audio-player');
+    if(audio && isFinite(audio.duration) && audio.duration > 0){
+      const rect = scrubEl.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      audio.currentTime = ratio * audio.duration;
+      updateScrubFill();
+    }
     return;
   }
   // click in edit form: do not propagate to row toggle
@@ -1700,6 +2128,7 @@ tree.addEventListener('mousedown', e=>{
   if(!tRow) return;
   if(e.target.closest('.track-edit')) return;
   if(e.target.closest('[data-play]')) return;  // play button is its own click path
+  if(e.target.closest('[data-scrub]')) return; // scrub bar handles its own click
   const id = tRow.dataset.id;
   const sx = e.clientX, sy = e.clientY;
   let armed = true;
@@ -2004,8 +2433,38 @@ async function refreshSpotifyStatus(){
       pill.textContent = 'NOT CONFIGURED';
       pill.classList.add('bad');
     }
+    // F1: scope_mismatch nudge — older cached token lacks user-library-read.
+    const scopeWarn = document.getElementById('s-scope-warn');
+    if(scopeWarn){
+      if(s && s.authorized && s.scope_mismatch){
+        scopeWarn.classList.remove('hidden');
+        scopeWarn.classList.add('warn');
+      } else {
+        scopeWarn.classList.add('hidden');
+        scopeWarn.classList.remove('warn');
+      }
+    }
+    // F2: cache age display — only when authorized and >= 7 days old.
+    const cacheEl = document.getElementById('s-cache-age');
+    if(cacheEl){
+      if(s && s.authorized && typeof s.cache_age_days === 'number' && s.cache_age_days >= 7){
+        cacheEl.textContent = `( authorized ${s.cache_age_days} day${s.cache_age_days===1?'':'s'} ago )`;
+        cacheEl.classList.remove('hidden');
+      } else {
+        cacheEl.classList.add('hidden');
+        cacheEl.textContent = '';
+      }
+    }
   } catch(e){}
 }
+// F1: re-authorize link — triggers the existing [ Authorize ] button click.
+document.addEventListener('click', e => {
+  if(e.target && e.target.id === 's-reauth'){
+    e.preventDefault();
+    const auth = document.getElementById('s-auth');
+    if(auth) auth.click();
+  }
+});
 $('#s-auth').addEventListener('click', async ()=>{
   if(!window.API){ toast('API not ready'); return; }
   const btn = $('#s-auth');
@@ -2019,6 +2478,11 @@ $('#s-auth').addEventListener('click', async ()=>{
     SPOTIFY_CONFIGURED = true;
     if(typeof setStatus === 'function') setStatus();
     await refreshSpotifyStatus();
+    // B1: surface the [ Browse Spotify ] button immediately after auth
+    // succeeds, instead of waiting for window.focus to re-poll.
+    if(typeof window.syncSpotifyBrowseBtn === 'function'){
+      try { await window.syncSpotifyBrowseBtn(); } catch(e){}
+    }
   } catch(err){
     toast('authorize failed: ' + err.message);
   } finally {
@@ -2455,6 +2919,12 @@ $('#w-continue').addEventListener('click', async ()=>{
     },
     async listJobs(){ return jfetch('/api/jobs'); },
     async getFailures(){ return jfetch('/api/failures'); },
+    async dismissFailure(spotifyUrl){
+      return jfetch('/api/failures/dismiss', {
+        method: 'POST',
+        body: JSON.stringify({spotify_url: spotifyUrl}),
+      });
+    },
     async getVersion(){ return jfetch('/api/version'); },
     async getLikedSongs(){ return jfetch('/api/spotify/liked'); },
     async getMyPlaylists(){ return jfetch('/api/spotify/playlists'); },
@@ -2493,9 +2963,23 @@ $('#w-continue').addEventListener('click', async ()=>{
   // active-jobs panel: collapsible header, monospace body.
   let FAILURES = [];
   let failuresCollapsed = false;
+  // C3: timestamp of the last successful /api/failures fetch. We use the
+  // response's Last-Modified header if present (FastAPI doesn't set it for
+  // JSON endpoints, so this typically falls back to the time of the response
+  // on the client side — which is "good enough" for a panel that polls
+  // every 30s anyway).
+  let FAILURES_LAST_UPDATED = null;
   function escapeHtml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+  function _fmtRelativeFailures(date){
+    if(!date) return '';
+    const sec = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+    if(sec < 60) return 'just now';
+    if(sec < 3600) return Math.round(sec/60) + ' min ago';
+    if(sec < 86400) return Math.round(sec/3600) + ' h ago';
+    return Math.round(sec/86400) + ' d ago';
   }
   function renderFailures(){
     const box = document.getElementById('failures-box');
@@ -2509,7 +2993,11 @@ $('#w-continue').addEventListener('click', async ()=>{
       return;
     }
     box.classList.remove('hidden');
-    label.textContent = `~~ FAILED TRACKS (${n}) ~~`;
+    // C3: include "last updated X ago" suffix when we have a timestamp.
+    const tsTail = FAILURES_LAST_UPDATED
+      ? ` — last updated ${_fmtRelativeFailures(FAILURES_LAST_UPDATED)}`
+      : '';
+    label.textContent = `~~ FAILED TRACKS (${n})${tsTail} ~~`;
     if(failuresCollapsed){
       toggle.textContent = '[Expand]';
       body.classList.add('hidden');
@@ -2523,7 +3011,11 @@ $('#w-continue').addEventListener('click', async ()=>{
       const url = escapeHtml(f.spotify_url || '');
       return `<div class="failure-row" style="font-family:var(--mono); display:flex; justify-content:space-between; gap:12px; padding:1px 0;">`
         + `<span>× ${artist} — ${title}</span>`
-        + `<a class="tlink" data-fail-idx="${i}" data-url="${url}">[open Spotify]</a>`
+        + `<span class="fail-actions">`
+        +   `<a class="tlink" data-fail-act="open" data-fail-idx="${i}" data-url="${url}">[open Spotify]</a>`
+        +   `<a class="tlink" data-fail-act="retry" data-fail-idx="${i}" data-url="${url}">[ retry ]</a>`
+        +   `<a class="tlink" data-fail-act="dismiss" data-fail-idx="${i}" data-url="${url}">[ &#215; ]</a>`
+        + `</span>`
         + `</div>`;
     }).join('');
   }
@@ -2531,16 +3023,67 @@ $('#w-continue').addEventListener('click', async ()=>{
     failuresCollapsed = !failuresCollapsed;
     renderFailures();
   });
-  document.getElementById('failures-body').addEventListener('click', e=>{
-    const a = e.target.closest('a[data-fail-idx]');
+  document.getElementById('failures-body').addEventListener('click', async e=>{
+    const a = e.target.closest('a[data-fail-act]');
     if(!a) return;
+    const act = a.dataset.failAct;
     const url = a.dataset.url;
-    if(url) window.open(url, '_blank', 'noopener');
+    if(act === 'open'){
+      if(url) window.open(url, '_blank', 'noopener');
+      return;
+    }
+    if(act === 'retry'){
+      // C1: fire a single-track retry job. Don't dismiss; the next
+      // failures.txt update reflects whether it succeeded.
+      if(!url){ toast('retry: no URL on row'); return; }
+      try{
+        const idx = parseInt(a.dataset.failIdx, 10);
+        const f = FAILURES[idx];
+        const label = (f && (f.title || f.artist)) ? `${f.artist || ''} — ${f.title || ''}` : url;
+        await API.startJob({url});
+        toast(`submitted retry: ${label}`);
+        if(API.refreshJobs) API.refreshJobs();
+      } catch(err){
+        toast('retry failed: ' + (err.message || 'unknown'));
+      }
+      return;
+    }
+    if(act === 'dismiss'){
+      // C2: confirm before dismissing. On success, replace the array with
+      // whatever the backend returns and re-render.
+      if(!url){ toast('dismiss: no URL on row'); return; }
+      const idx = parseInt(a.dataset.failIdx, 10);
+      const f = FAILURES[idx];
+      const which = (f && (f.title || f.artist)) ? `${f.artist || ''} — ${f.title || ''}` : url;
+      const ok = await showModal({
+        title: 'Dismiss failure',
+        body: `Dismiss this failure entry?\n\n${which}\n\nThis only removes it from the list — the track is not retried or restored.`,
+        ok: 'Dismiss',
+        cancel: 'Cancel',
+      });
+      if(!ok) return;
+      try{
+        const updated = await API.dismissFailure(url);
+        FAILURES = Array.isArray(updated) ? updated : [];
+        FAILURES_LAST_UPDATED = new Date();
+        renderFailures();
+        toast('dismissed');
+      } catch(err){
+        toast('dismiss failed: ' + (err.message || 'unknown'));
+      }
+    }
   });
   async function refreshFailures(){
     try{
-      const list = await API.getFailures();
+      // Hand-rolled fetch so we can read the Last-Modified header (when
+      // the backend bothers to set it). Falls back to "now" otherwise.
+      const r = await fetch('/api/failures', {headers:{'Content-Type':'application/json'}});
+      if(!r.ok) throw new Error(r.status + ' ' + r.statusText);
+      const list = await r.json();
       FAILURES = Array.isArray(list) ? list : [];
+      const lm = r.headers.get('Last-Modified');
+      const parsed = lm ? Date.parse(lm) : NaN;
+      FAILURES_LAST_UPDATED = isNaN(parsed) ? new Date() : new Date(parsed);
       renderFailures();
     } catch(err){
       // endpoint may not exist yet on older servers — leave panel hidden
@@ -2554,6 +3097,12 @@ $('#w-continue').addEventListener('click', async ()=>{
   // reconnect repeatedly fails (e.g. server restart, proxy weirdness).
   let WS_JOBS = null;
   let WS_CONNECTED = false;
+  // E1: exponential backoff for WS reconnect. Starts at 1s, doubles up to
+  // 30s. Resets to 1s on any successful message received (a stable conn is
+  // "healthy" again).
+  let WS_BACKOFF = 1000;
+  const WS_BACKOFF_MIN = 1000;
+  const WS_BACKOFF_MAX = 30000;
   function setJobsWsIndicator(connected){
     WS_CONNECTED = connected;
     const label = document.getElementById('jobs-label');
@@ -2580,7 +3129,23 @@ $('#w-continue').addEventListener('click', async ()=>{
       ws.onmessage = (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch(e){ return; }
-        if(!msg || (msg.type !== 'snapshot' && msg.type !== 'update')) return;
+        if(!msg) return;
+        // E1: any successful message → reset backoff.
+        WS_BACKOFF = WS_BACKOFF_MIN;
+        // Handle scan_update messages from the new async scan worker.
+        // Scan progress is incidental; we surface it as a toast on terminal
+        // states and trigger a library refresh when done.
+        if(msg.type === 'scan_update'){
+          const scan = msg.scan || {};
+          if(scan.status === 'done' || scan.status === 'completed'){
+            toast(`scan done — ${scan.total || 0} tracks`);
+            if(API.refreshLibrary) API.refreshLibrary();
+          } else if(scan.status === 'failed' || scan.status === 'error'){
+            toast('scan failed' + (scan.error ? ': ' + scan.error : ''));
+          }
+          return;
+        }
+        if(msg.type !== 'snapshot' && msg.type !== 'update') return;
         const jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
         // Detect job → terminal-state transitions on this update so we can
         // refresh the library + playlists once when a job finishes (a new
@@ -2620,15 +3185,21 @@ $('#w-continue').addEventListener('click', async ()=>{
       const reconnect = () => {
         setJobsWsIndicator(false);
         WS_JOBS = null;
-        // Localhost — exponential backoff is overkill. Fixed 5s is fine; the
-        // 10s polling fallback below covers the gap regardless.
-        setTimeout(connectJobsWS, 5000);
+        // E1: exponential backoff. WS_BACKOFF starts at 1s and doubles each
+        // time we hit this path, capped at 30s. A successful onmessage resets
+        // it back to 1s. The 10s HTTP polling fallback below covers the gap
+        // regardless of how far backoff has grown.
+        const delay = WS_BACKOFF;
+        WS_BACKOFF = Math.min(WS_BACKOFF_MAX, WS_BACKOFF * 2);
+        setTimeout(connectJobsWS, delay);
       };
       ws.onclose = reconnect;
       ws.onerror = () => { try { ws.close(); } catch(e){} };
     } catch(err){
       setJobsWsIndicator(false);
-      setTimeout(connectJobsWS, 5000);
+      const delay = WS_BACKOFF;
+      WS_BACKOFF = Math.min(WS_BACKOFF_MAX, WS_BACKOFF * 2);
+      setTimeout(connectJobsWS, delay);
     }
   }
 
@@ -2720,34 +3291,68 @@ $('#w-continue').addEventListener('click', async ()=>{
   // Polls /api/version once on load. Shows a dismissable banner above the
   // header if a newer release is available. Dismissal is keyed to the
   // version string so the next release re-prompts.
+  // Also writes a small "Update check: X min ago — current version" line to
+  // the bottom of Settings so the silent-on-error behavior is visible.
+  function _formatRelative(iso){
+    if(!iso) return null;
+    const t = Date.parse(iso);
+    if(isNaN(t)) return null;
+    const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if(sec < 60) return 'just now';
+    if(sec < 3600) return Math.round(sec/60) + ' min ago';
+    if(sec < 86400) return Math.round(sec/3600) + ' h ago';
+    return Math.round(sec/86400) + ' d ago';
+  }
+  function _setUpdateCheckLine(text){
+    const el = document.getElementById('s-update-check');
+    if(el) el.textContent = text;
+  }
   (async function checkForUpdate(){
     const banner = document.getElementById('update-banner');
-    if(!banner) return;
-    const txt = document.getElementById('update-banner-text');
-    const link = document.getElementById('update-banner-link');
-    const dismiss = document.getElementById('update-banner-dismiss');
+    const txt = banner ? document.getElementById('update-banner-text') : null;
+    const link = banner ? document.getElementById('update-banner-link') : null;
+    const dismiss = banner ? document.getElementById('update-banner-dismiss') : null;
+    let r;
     try{
-      const r = await API.getVersion();
-      if(!r || !r.checked || r.error || !r.update_available) return;
-      let dismissed = null;
-      try { dismissed = localStorage.getItem('tunehoard_dismissed_version'); } catch(e){}
-      if(dismissed && r.latest && dismissed === r.latest) return;
-      txt.textContent = `==[ UPDATE AVAILABLE: v${r.latest} ]==`;
-      if(r.release_url){
-        link.href = r.release_url;
-        link.classList.remove('hidden');
-      } else {
-        link.classList.add('hidden');
-      }
-      dismiss.addEventListener('click', e => {
-        e.preventDefault();
-        try { if(r.latest) localStorage.setItem('tunehoard_dismissed_version', r.latest); } catch(e){}
-        banner.classList.add('hidden');
-      });
-      banner.classList.remove('hidden');
+      r = await API.getVersion();
     } catch(err){
-      // silent — user doesn't care if the update check fails
+      _setUpdateCheckLine('Update check failed: ' + (err.message || 'network error'));
+      return;
     }
+    // F3: status line in Settings reflects what the banner heuristics decided.
+    if(r && r.error){
+      _setUpdateCheckLine('Update check failed: ' + r.error);
+    } else if(r && r.checked){
+      const rel = _formatRelative(r.last_checked_at);
+      const when = rel ? rel : 'just now';
+      let tail;
+      if(r.update_available && r.latest){
+        tail = `update available (v${r.latest})`;
+      } else {
+        tail = 'current version' + (r.current ? ` (v${r.current})` : '');
+      }
+      _setUpdateCheckLine(`Update check: ${when} — ${tail}`);
+    } else {
+      _setUpdateCheckLine('Update check: not yet checked');
+    }
+    if(!banner) return;
+    if(!r || !r.checked || r.error || !r.update_available) return;
+    let dismissed = null;
+    try { dismissed = localStorage.getItem('tunehoard_dismissed_version'); } catch(e){}
+    if(dismissed && r.latest && dismissed === r.latest) return;
+    txt.textContent = `==[ UPDATE AVAILABLE: v${r.latest} ]==`;
+    if(r.release_url){
+      link.href = r.release_url;
+      link.classList.remove('hidden');
+    } else {
+      link.classList.add('hidden');
+    }
+    dismiss.addEventListener('click', e => {
+      e.preventDefault();
+      try { if(r.latest) localStorage.setItem('tunehoard_dismissed_version', r.latest); } catch(e){}
+      banner.classList.add('hidden');
+    });
+    banner.classList.remove('hidden');
   })();
 
   // ---------- Spotify browse picker ----------
@@ -2767,6 +3372,10 @@ $('#w-continue').addEventListener('click', async ()=>{
     }
   }
   syncSpotifyBrowseBtn();
+  // Expose so the [ Authorize ] button handler (defined outside this IIFE)
+  // can fire it immediately on a successful auth — without this it only
+  // re-checks on window.focus, which doesn't fire after an in-tab auth.
+  window.syncSpotifyBrowseBtn = syncSpotifyBrowseBtn;
   // Re-check on focus (the user may authorize in another tab and tab back).
   window.addEventListener('focus', syncSpotifyBrowseBtn);
 
@@ -2784,6 +3393,16 @@ $('#w-continue').addEventListener('click', async ()=>{
     rule.className = 'rule';
     rule.textContent = '~~~~~~~~~~~~~~~~~~~~~~~~~';
     box.appendChild(rule);
+    // B2: search input above the list. Live-filters by name (case-insensitive
+    // substring). Liked Songs row stays pinned regardless of filter.
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'sp-pick-search';
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.placeholder = 'filter playlists...';
+    searchInput.autocomplete = 'off';
+    searchWrap.appendChild(searchInput);
+    box.appendChild(searchWrap);
     const list = document.createElement('div');
     list.className = 'sp-pick-list';
     list.innerHTML = '<div class="sp-pick-empty">loading…</div>';
@@ -2820,6 +3439,36 @@ $('#w-continue').addEventListener('click', async ()=>{
       }
     }
 
+    // Held in closure so the search-input handler can re-render without
+    // re-fetching when the user types.
+    let allRows = [];
+    function renderRows(query){
+      const q = (query || '').trim().toLowerCase();
+      const matched = allRows.filter(r => {
+        // B2: Liked Songs (cls 'liked') stays visible regardless of filter.
+        if(r.cls === 'liked') return true;
+        if(!q) return true;
+        return (r.name || '').toLowerCase().includes(q);
+      });
+      if(matched.length === 0){
+        list.innerHTML = '<div class="sp-pick-empty">( no matches )</div>';
+        return;
+      }
+      list.innerHTML = matched.map((r) =>
+        `<div class="sp-pick-row ${r.cls}" data-idx="${r.idx}">${r.html}</div>`
+      ).join('');
+    }
+    list.addEventListener('click', e => {
+      const row = e.target.closest('.sp-pick-row');
+      if(!row) return;
+      const idx = parseInt(row.dataset.idx, 10);
+      const r = allRows.find(x => x.idx === idx);
+      if(r) pick(r.url);
+    });
+    searchInput.addEventListener('input', () => renderRows(searchInput.value));
+    // Auto-focus the search input so the user can start typing immediately.
+    setTimeout(() => searchInput.focus(), 0);
+
     // Fetch both endpoints in parallel.
     Promise.all([
       API.getLikedSongs().catch(err => ({__err: err})),
@@ -2844,9 +3493,17 @@ $('#w-continue').addEventListener('click', async ()=>{
       }
 
       const rows = [];
+      let nextIdx = 0;
       if(liked && liked.url){
         const tc = (typeof liked.track_count === 'number') ? liked.track_count : '?';
+        // B3: cache the count so setStatus() can show it on the URL bar
+        // when the user later submits. Survives picker close.
+        if(typeof liked.track_count === 'number'){
+          window._likedSongsCount = liked.track_count;
+        }
         rows.push({
+          idx: nextIdx++,
+          name: liked.name || 'Liked Songs',
           html: `★ ${escapeHtml(liked.name || 'Liked Songs')} (${tc} tracks)`,
           url: liked.url,
           cls: 'liked',
@@ -2857,6 +3514,8 @@ $('#w-continue').addEventListener('click', async ()=>{
         const tc = (typeof p.track_count === 'number') ? p.track_count : '?';
         const owner = p.owner ? ` — ${escapeHtml(p.owner)}` : '';
         rows.push({
+          idx: nextIdx++,
+          name: p.name || '',
           html: `≫ ${escapeHtml(p.name || '(untitled)')} (${tc} tracks)${owner}`,
           url: p.url,
           cls: '',
@@ -2866,15 +3525,8 @@ $('#w-continue').addEventListener('click', async ()=>{
         list.innerHTML = '<div class="sp-pick-empty">no playlists found</div>';
         return;
       }
-      list.innerHTML = rows.map((r, i) =>
-        `<div class="sp-pick-row ${r.cls}" data-idx="${i}">${r.html}</div>`
-      ).join('');
-      list.addEventListener('click', e => {
-        const row = e.target.closest('.sp-pick-row');
-        if(!row) return;
-        const idx = parseInt(row.dataset.idx, 10);
-        if(rows[idx]) pick(rows[idx].url);
-      });
+      allRows = rows;
+      renderRows('');
     });
   }
   const browseBtn = document.getElementById('browse-spotify-btn');
