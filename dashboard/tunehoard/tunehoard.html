@@ -857,7 +857,7 @@ hr.tilde::before{
     <div class="selbar hidden" id="selbar">
       <span id="sel-count">0 tracks selected</span>
       <div class="btn-row">
-        <button class="btn" id="bulk-reanalyze">[ Re-analyze ]</button>
+        <button class="btn" id="bulk-reanalyze">[ Analyze ]</button>
         <button class="btn" id="bulk-delete">[ Delete ]</button>
         <button class="btn" id="bulk-move">[ Move to bucket ]</button>
       </div>
@@ -899,7 +899,7 @@ hr.tilde::before{
 
   <div class="fset">
     <div class="inset-label">~~ DOWNLOAD BEHAVIOR ~~</div>
-    <div style="margin-bottom:10px;">Defaults applied to every job submitted from this dashboard. <span class="muted">Skip BPM/key analysis</span> is useful when you just want to grab the audio fast — the file lands untagged, and you can run analysis later via <span class="muted">[ Re-analyze ]</span> per row or right-click on a bucket.</div>
+    <div style="margin-bottom:10px;">Defaults applied to every job submitted from this dashboard. <span class="muted">Skip BPM/key analysis</span> is useful when you just want to grab the audio fast — the file lands untagged, and you can run analysis later via <span class="muted">[ Analyze ]</span> per row or right-click on a bucket.</div>
     <div class="row" id="dl-behavior-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:6px;">
       <span class="checkbox on" data-dl-key="skip_existing">[x] Skip tracks already in the library</span>
       <span class="checkbox" data-dl-key="skip_analyze">[ ] Skip BPM/key analysis (download only)</span>
@@ -1939,7 +1939,7 @@ function renderLib(){
                 +   `<span class="lbl">Camelot <input type="text" value="${t.cam}" maxlength="3" style="width:60px;text-transform:uppercase;" data-f="cam"></span>`
                 +   `<span class="lbl">Key <input type="text" value="${t.key}" maxlength="4" style="width:60px;" data-f="key"></span>`
                 +   `<button class="btn" data-act="save">[ Save ]</button>`
-                +   `<button class="btn" data-act="reanalyze">[ Re-analyze ]</button>`
+                +   `<button class="btn" data-act="reanalyze">[ Analyze ]</button>`
                 +   `<button class="btn" data-act="open">[ Open in folder ]</button>`
                 +   `<button class="btn" data-act="delete">[ Delete ]</button>`
                 + `</div>`
@@ -2019,8 +2019,8 @@ tree.addEventListener('click', e=>{
       if(window.API) {
         toast('re-analyzing "' + t.artist + ' — ' + t.title + '"...');
         window.API.reanalyzeTrack(id)
-          .then(updated => { Object.assign(t, updated); t.bucket = bucketFor(t.bpm); renderLib(); toast('re-analyzed: ' + t.cam + ' · ' + t.bpm + ' BPM'); })
-          .catch(err => toast('re-analyze failed: ' + err.message));
+          .then(updated => { Object.assign(t, updated); t.bucket = bucketFor(t.bpm); renderLib(); toast('analyzed: ' + t.cam + ' · ' + t.bpm + ' BPM'); })
+          .catch(err => toast('analyze failed: ' + err.message));
       }
     } else if(act==='open'){
       if(window.API){
@@ -2298,7 +2298,7 @@ tree.addEventListener('contextmenu', e=>{
   ctxMenu.className = 'ctx-menu';
   const items = [
     {label:'Open folder in Explorer', act:'open'},
-    {label:'Re-analyze all in bucket', act:'reanalyze'},
+    {label:'Analyze all in bucket', act:'reanalyze'},
     {label:'Collapse all',  act:'collapseAll', sep:true},
     {label:'Expand all',    act:'expandAll'},
   ];
@@ -2325,25 +2325,25 @@ tree.addEventListener('contextmenu', e=>{
       else {
         closeCtx();
         const confirmed = await showModal({
-          title: 'Re-analyze bucket',
-          body: `Re-analyze all ${ids.length} tracks in ${name}/?\n\n~3s per track.`,
-          ok: 'Re-analyze',
+          title: 'Analyze bucket',
+          body: `Analyze all ${ids.length} tracks in ${name}/?\n\n~3s per track.`,
+          ok: 'Analyze',
           cancel: 'Cancel',
         });
         if(confirmed){
           renderLib();
           (async ()=>{
             let ok = 0, fail = 0;
-            toast(`reanalyze 0/${ids.length}…`);
+            toast(`analyze 0/${ids.length}…`);
             for(let i = 0; i < ids.length; i++){
               try { await window.API.reanalyzeTrack(ids[i]); ok++; }
               catch(err){ fail++; }
               if(i % 5 === 4 || i === ids.length - 1){
-                toast(`reanalyze ${i+1}/${ids.length}${fail ? ' · '+fail+' failed' : ''}`);
+                toast(`analyze ${i+1}/${ids.length}${fail ? ' · '+fail+' failed' : ''}`);
               }
             }
             if(window.API.refreshLibrary) await window.API.refreshLibrary();
-            toast(`reanalyze done — ${ok} ok${fail ? ', '+fail+' failed' : ''}`);
+            toast(`analyze done — ${ok} ok${fail ? ', '+fail+' failed' : ''}`);
           })();
           return;
         }
@@ -2680,7 +2680,7 @@ $('#src-list').addEventListener('click', e=>{
 // Scan-folder button on the empty library state — builds an index.csv
 // from whatever MP3s already exist in library_dir. BPM/Camelot are left
 // blank by default; user can opt in to reading existing ID3 BPM/key tags
-// or run Re-analyze on selected tracks afterwards.
+// or run Analyze on selected tracks afterwards.
 $('#lib-scan-btn')?.addEventListener('click', async ()=>{
   if(!window.API){ toast('API not ready'); return; }
   const choice = await showModal({
@@ -2688,7 +2688,7 @@ $('#lib-scan-btn')?.addEventListener('click', async ()=>{
     body:
       'How should BPM and Camelot key be populated for each MP3?\n\n' +
       'Read tags only — use BPM/key already written into the file.\n' +
-      'Tracks with no tags stay unlabeled (you can run Re-analyze\n' +
+      'Tracks with no tags stay unlabeled (you can run Analyze\n' +
       'on selected tracks later).\n\n' +
       'Analyze missing — read existing tags AND run librosa\n' +
       '(~3s per track) on tracks that have no BPM/key tag yet.',
@@ -2751,9 +2751,9 @@ async function runBulk(label, fn){
 $('#bulk-reanalyze').addEventListener('click', async ()=>{
   if(selected.size === 0) return;
   const ok = await showModal({
-    title: 'Re-analyze tracks',
-    body: `Re-analyze ${selected.size} track${selected.size===1?'':'s'}?\n\nRuns librosa BPM/key detection on each (~3s/track).`,
-    ok: 'Re-analyze',
+    title: 'Analyze tracks',
+    body: `Analyze ${selected.size} track${selected.size===1?'':'s'}?\n\nRuns librosa BPM/key detection on each (~3s/track).`,
+    ok: 'Analyze',
     cancel: 'Cancel',
   });
   if(!ok) return;
