@@ -192,3 +192,49 @@ If the user wants wheel-order sort (1A, 1B, 2A, 2B, ...), parse to `(int(num), l
 ## The dev environment is Windows 11
 
 All paths use `pathlib`, but shell examples in docs assume bash-on-Windows conventions (forward slashes, `python` on PATH). If running on Linux/macOS, the only real difference is `ffmpeg` installation. No code changes needed.
+
+## PyInstaller hidden imports for librosa-heavy apps are fragile
+
+`tunehoard.spec` enumerates a long hidden-import list because librosa pulls in `numba` + `llvmlite` + `soxr` + `pooch`, all of which load resources by path at import time and miss PyInstaller's static analysis. Same for `uvicorn[standard]` — uvicorn picks protocols by string at runtime via `importlib`, so its `protocols.http`, `protocols.websockets`, `lifespan.on`, `loops.{auto,asyncio}` submodules need to be listed explicitly. `httptools`, `websockets`, `watchfiles` cover the optional `[standard]` extras. `uvloop` is listed for parity but PyInstaller silently skips it on Windows where it doesn't install.
+
+`copy_metadata` is required for `pydantic` / `fastapi` / `uvicorn` so frozen builds don't trip `PackageNotFoundError` when those libraries read their own `dist-info` at import time for version detection.
+
+The most likely first-build failure is a missing `numba` data file or an `llvmlite` DLL discovery issue on Windows — both fix via additions to `binaries=` or a custom hook in `hookspath=[]`. CI traceback will point at the exact missing artifact.
+
+`PyInstaller` is intentionally NOT in `requirements.txt` — keeping it out of the runtime install lets users `pip install -r requirements.txt` without dragging in 100MB of build tooling.
+
+## pywebview wraps server.py — but server.py auto-opens a browser tab
+
+`server.py`'s startup schedules `threading.Timer(1.0, lambda: webbrowser.open(url)).start()`. When TuneHoard launches via `app_native.py` (pywebview), we don't want that — the user already gets the native window.
+
+`app_native.py` neutralizes it by monkey-patching `webbrowser.open` to a no-op lambda *before* importing `server`. This is intentional cleverness, documented at the patch site. The patch is per-process, doesn't bleed into anything else, and is the cleanest in-scope solution because changing `server.py` to honor an env-var would force coupling between the two entry points.
+
+If you ever introduce a third entry point (Electron wrapper, etc.), apply the same pattern — don't bake env-var checks into `server.py`.
+
+## WebSocket broadcast captures the asyncio loop on first connect
+
+`server.py` has a module-level `_WS_LOOP = None` that gets set on the FIRST `/ws/jobs` accept (via `asyncio.get_running_loop()`). The runner thread's `_broadcast_jobs()` uses that captured loop with `asyncio.run_coroutine_threadsafe(...)` to schedule sends from a non-asyncio thread context.
+
+Why capture instead of calling `asyncio.get_event_loop()` from the worker thread: in Python 3.10+ that call is deprecated for non-main threads and may return a different loop than uvicorn's. Capture-on-first-connect is the documented pattern.
+
+Edge case: events fired before any client has connected get dropped — `_broadcast_jobs()` silently no-ops when `_WS_LOOP is None`. That's fine; the very first WS connect receives a `snapshot` message that reads JOBS directly, so no events are *lost* — they're recovered via the snapshot. If a feature ever needs reliable historical events (e.g., job-completed notifications), it can't rely on this — you'd need a real pub/sub bus.
+
+On Windows + Python 3.13, FastAPI/uvicorn defaults to `ProactorEventLoop`; `run_coroutine_threadsafe` works fine on it. Worth flagging because Windows event-loop policy *can* bite people who switch to selector-based loops manually.
+
+## /api/library/switch path-traversal defense is layered, not single-checked
+
+The endpoint accepts a playlist `name` and resolves it as a sibling subfolder of `library_dir.parent`. The defense:
+
+1. **String reject:** names containing `/`, `\`, `..`, or that are empty / `.` are rejected up front with HTTP 400.
+2. **Resolve + parent check:** `(library_dir.parent / name).resolve()` is computed; if `candidate.parent != library_dir.parent.resolve()`, it's rejected. This catches NTFS junctions, symlinks, or any path that resolves elsewhere on disk.
+3. **CSV existence:** finally `<candidate>/index.csv` must exist. Without this the endpoint would happily switch to an empty directory.
+
+Don't simplify any one of these away — each catches a different attack class. Step 1 catches naive `../` strings, step 2 catches symlink games, step 3 prevents the user from "switching" into garbage state via the API. The endpoint isn't exposed to untrusted clients in the current model (localhost-only), but the defense is cheap and makes future networked deploys safer.
+
+## Spotify scope expansion: existing tokens silently work, new endpoints prompt re-auth
+
+The OAuth scope list grew from `playlist-read-private playlist-read-collaborative` to also include `user-library-read` in 2026 for the Liked Songs picker. Pre-existing `.spotify_cache` tokens lack the new scope. Spotipy detects scope mismatch on the next `get_authorization_url(...)` call and re-prompts the user — there's no manual cache invalidation needed.
+
+But: the *existing* endpoints (playlist-read-only) keep working with the old token until a saved-tracks call is attempted. So if you only ever hit `get_playlist_tracks()`, you'll never see the re-auth. The first time someone clicks `[ Browse Spotify ]` (which triggers `current_user_saved_tracks(limit=1)`), they'll get re-prompted. Document this in user-facing release notes so the re-prompt isn't surprising.
+
+If you're adding a new endpoint that needs *another* scope: append it to the scope strings in `spotify_client.py`, document the re-auth in release notes, and call it a day. Don't try to detect the mismatch and force-clear `.spotify_cache` — spotipy already handles it correctly.

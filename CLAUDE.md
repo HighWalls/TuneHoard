@@ -43,15 +43,19 @@ python server.py    # starts FastAPI at http://127.0.0.1:8765/, auto-opens brows
 
 Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.html` runs against `server.py`'s API and reads / writes the same `index.csv` files the CLI uses. Settings live in `.tunehoard_settings.json` (gitignored). The dashboard supports:
 
-- URL preview with real titles from the backend (debounced, abortable). URL bar accepts paste *and* drag-drop (text/uri-list or text/plain).
-- Download jobs with live progress / ETA, cancel kills the subprocess tree. First-run guard: if `library_dir` is unset, the Download button shows a modal pointing the user at Settings instead of letting the request 400.
+- URL preview with real titles from the backend (debounced, abortable). URL bar accepts paste *and* drag-drop (text/uri-list or text/plain). `spotify:liked` is recognized as a special URL that downloads the user's Liked Songs.
+- Download jobs with **live progress streamed over WebSocket** (`/ws/jobs`); 10-second HTTP polling kept as a safety net if the socket drops and reconnects fail. Cancel kills the subprocess tree. First-run guard: if `library_dir` is unset, the Download button shows a modal pointing the user at Settings instead of letting the request 400.
+- **Multi-playlist sidebar** on the left of the library view: auto-discovers sibling folders under `library_dir.parent` containing an `index.csv`, click to switch the dashboard between playlists. Hidden when ≤ 1 playlist exists.
 - Library tree with collapsible BPM buckets (empty buckets are hidden); shift-click extends a range from the last-clicked anchor (in DOM order), ctrl-click toggles individuals.
 - Inline edit form per track (Save / Re-analyze / Open in folder / Delete)
+- **Per-track [▶] play button** that streams the MP3 from `GET /api/audio/{id}` into a single global hidden `<audio>` element — Range-aware so seeking doesn't redownload.
 - Drag-drop tracks between buckets (auto-picks half-time / double-time / midpoint BPM)
 - Bulk action bar on selected rows (Re-analyze / Delete / Move to bucket)
 - Right-click bucket → Open folder in Explorer / Re-analyze all in bucket / Expand–Collapse all
 - Source filter radios: All / Spotify / YouTube / SoundCloud / Scanned (matches `t.source === ""` for tracks indexed via Scan folder).
 - Failed-tracks panel between jobs and library (hidden when count = 0): lists `× artist — title  [open Spotify]` rows, polled from `GET /api/failures` on a 30s timer + on focus.
+- **Spotify picker** [ Browse Spotify ] button (visible when authorized) opens a modal listing ★ Liked Songs + ≫ user playlists; selecting one drops its url into the URL bar.
+- **Auto-update banner** at the top of the page when `GET /api/version` reports a newer GitHub release tag. Dismissible per-version via localStorage; silent on network errors.
 - Settings page with native file pickers (tkinter), Spotify OAuth (with 5-min auth timeout), source reorder, advanced BPM clamp / analysis duration / ffmpeg path inputs.
 - Three-button "Scan folder" dialog for indexing pre-existing MP3 collections (read tags only / analyze missing via librosa / abort)
 - Manual "Migrate library" button to rewrite TKEY / filename to a new key format
@@ -59,6 +63,18 @@ Same pipeline, GUI front-end. The dashboard at `dashboard/tunehoard/tunehoard.ht
 - Theme switcher (top-left) with 3 presets + Randomize from a curated palette pool
 
 See `docs/ARCHITECTURE.md` § Dashboard for the full API surface and helper-function reference.
+
+### Native window (optional)
+
+```bash
+python app_native.py    # same dashboard, hosted in a 1280×800 pywebview window
+```
+
+`app_native.py` boots uvicorn on a daemon thread and opens the dashboard in a native OS window instead of the user's default browser. Closing the window flips `uvicorn.Server.should_exit` to shut the server down. Internally it monkey-patches `webbrowser.open` to a no-op before importing `server` to suppress the auto-open-tab.
+
+### Distribution
+
+`tunehoard.spec` is a PyInstaller onefile spec (`pyinstaller tunehoard.spec` → `dist/TuneHoard.exe`). `.github/workflows/build.yml` builds Windows + macOS binaries on every `v*.*.*` tag push and attaches them to the GitHub Release. PyInstaller is *not* in `requirements.txt` — it's installed in CI and as-needed locally.
 
 ### Setup (either path)
 
@@ -69,9 +85,12 @@ See `docs/ARCHITECTURE.md` § Dashboard for the full API surface and helper-func
 | File | Responsibility |
 |---|---|
 | `main.py` | CLI, URL dispatch, orchestration, filename formatting, CSV export |
-| `server.py` | FastAPI dashboard server. Wraps every CLI helper as JSON endpoints; spawns `main.py` as a subprocess for download jobs. Settings persisted to `.tunehoard_settings.json`. |
-| `dashboard/tunehoard/tunehoard.html` | Single-file vanilla-JS dashboard. Booted by `server.py`. On load it replaces its built-in mock data with `/api/library` + `/api/jobs` and polls them. |
-| `spotify_client.py` | Spotify playlist or track URL → `list[Track]` via spotipy (OAuth user flow). Defines the `Track` dataclass; `get_playlist_tracks()` for playlists, `get_track()` for single tracks. |
+| `server.py` | FastAPI dashboard server. Wraps every CLI helper as JSON endpoints; spawns `main.py` as a subprocess for download jobs. Pushes job state over `/ws/jobs` WebSocket. Settings persisted to `.tunehoard_settings.json`. |
+| `dashboard/tunehoard/tunehoard.html` | Single-file vanilla-JS dashboard. Booted by `server.py`. On load it replaces its built-in mock data with `/api/library` + `/api/jobs` (HTTP) + `/ws/jobs` (WebSocket push). |
+| `spotify_client.py` | Spotify playlist / track / Liked Songs → `list[Track]` via spotipy (OAuth user flow). Defines the `Track` dataclass; `get_playlist_tracks()` / `get_track()` / `get_liked_songs()`. |
+| `app_native.py` | Optional pywebview entry point — runs `server.py` on a daemon thread and shows the dashboard in a native OS window instead of a browser tab. |
+| `tunehoard.spec` | PyInstaller onefile spec for `dist/TuneHoard.exe`. Bundles `dashboard/`, the librosa+numba+llvmlite+uvicorn hidden-import tree, and `copy_metadata` for pydantic/fastapi/uvicorn. |
+| `.github/workflows/build.yml` | GitHub Actions: builds Win+macOS binaries on tag pushes (`v*.*.*`), attaches them to the auto-generated GitHub Release. |
 | `ytdlp_loader.py` | YouTube / SoundCloud playlist or single video URL → `list[Track]` via yt-dlp. Entries carry a `source_url` for direct download. Single-video URLs return folder name `"singles"`. |
 | `downloader.py` | yt-dlp wrapper with two modes: `download_url()` (direct) for YT/SC entries, `download_track()` (search) for Spotify-derived tracks. |
 | `analyzer.py` | librosa: BPM (beat tracker) + key (Krumhansl-Schmuckler on chroma) |
@@ -96,7 +115,10 @@ Tracks that fail on every source are written to `failures.txt` alongside `index.
 - **Filename pattern:** `{camelot} - {bpm:03d} - {artist} - {title}.mp3`. Sorts nicely in file browsers and doubles as a visual fallback if tags get stripped.
 - **BPM bucketing (`--bucket-by-bpm`).** Anchor band is `115-125` (11 wide, DJ-idiomatic), everything else is 10-wide: `126-135`, `136-145`, ..., `105-114`, `95-104`, etc. No-BPM tracks go to `unknown-bpm/`. The bucket name is derived from BPM each time — rerunning with `--skip-existing --bucket-by-bpm` reorganizes existing files in place (and cleans empty folders), so the flag is safe to toggle on an already-downloaded playlist. **During the sync pass it also re-writes ID3 tags from the CSV row**, so manual edits to `index.csv` (e.g., fixing a wrong BPM) propagate into the file's tags + folder location on the next run.
 - **Fixing wrong BPMs.** Two workflows: (1) bulk auto-correct via `--reanalyze --bucket-by-bpm` (re-runs the improved detector on every existing MP3, updates tags + filenames + CSV + buckets); (2) surgical via editing `index.csv` then rerunning with `--skip-existing --bucket-by-bpm`. The detector uses `start_bpm=150` and clamps to `[85, 200]` by default to reduce half-time errors — genuine sub-85 BPM tracks (boom-bap) get wrongly doubled and need the manual path (or `--bpm-min 70` for that single run).
-- **OAuth user flow (not Client Credentials).** Spotify tightened Client Credentials access to `playlist_items` in 2025 — it now returns 401 even on public playlists. We use `SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative`. This reads both public and private playlists owned by OR accessible to the authenticated user. Editorial/algorithmic playlists (IDs starting `37i9dQZF1...`) still 404 — that's a separate access tier. **YouTube / SoundCloud URLs don't need any auth at all.**
+- **OAuth user flow (not Client Credentials).** Spotify tightened Client Credentials access to `playlist_items` in 2025 — it now returns 401 even on public playlists. We use `SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative user-library-read`. This reads public + private + collaborative + Liked Songs. Editorial/algorithmic playlists (IDs starting `37i9dQZF1...`) still 404 — that's a separate access tier. **YouTube / SoundCloud URLs don't need any auth at all.** The `user-library-read` scope was added in 2026 for the Spotify picker — pre-existing `.spotify_cache` tokens lack the scope and trigger a one-time re-auth on the next call to `current_user_saved_tracks()`.
+- **Multi-playlist layout.** Each "playlist" is a sibling subfolder under `library_dir.parent`, each with its own `index.csv` and bucket subdirs. The dashboard sidebar walks the parent and offers per-playlist switching; the CLI achieves the same via `--out=parent --into=playlist_name`. There is no global cross-playlist index — that's deliberate, dedup is intra-playlist.
+- **`spotify:liked` is a sentinel URL.** Lowercase-and-strip equality; not a real URL. Recognized in `main.py`'s URL dispatcher (before the Spotify regex) and in `server.py`'s `/api/preview`. Submitted via the dashboard's [ Browse Spotify ] picker.
+- **WebSocket pushes are best-effort, polling is the truth-of-record.** `/ws/jobs` broadcasts on JOBS state changes (throttled to ~2 Hz on chatty stdout, unthrottled on terminal states). The dashboard treats WS messages as a fast hint — the 10-second `refreshJobs()` poll runs unconditionally so a dropped/missed message can never desync the UI for long.
 - **`spotify_id` column is a misnomer.** It's a generic primary key. Spotify tracks are raw Spotify IDs; YouTube entries are `"yt:<video_id>"`; SoundCloud are `"sc:<track_id>"`. Namespaced to prevent collisions across sources. Do not "clean up" by splitting into separate columns — it would break the existing `--skip-existing` dedup path.
 - **Local analysis only.** We do not call Spotify Audio Features or any paid BPM/key API. See `docs/GOTCHAS.md` for why.
 - **Windows-first.** The dev env is Windows 11. Paths use `pathlib`; filename sanitization strips `<>:"/\|?*` and control chars. stdout/stderr are reconfigured to UTF-8 at startup because the default cp1252 codepage can't print most track titles or the `→` progress arrows.

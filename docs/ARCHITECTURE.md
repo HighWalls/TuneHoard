@@ -53,7 +53,8 @@ out_dir/failures.txt    (if any track matched no source)
 - `Track` — dataclass shared across loaders. `source_url` is set for YT/SC entries (direct download) and `None` for Spotify entries (search-based download). `search_query` property builds `"primary_artist - title"`; falls back to bare title if `artists` is empty.
 - `get_playlist_tracks(url, cid, secret) -> (playlist_name, list[Track])` — paginates `playlist_items` via `sp.next()`. Skips items where the per-entry payload is None or missing an ID (Spotify returns these for unavailable/local tracks). Reads from the `item` key (post-2025 schema) with a fallback to legacy `track` key.
 - `get_track(url, cid, secret) -> ("singles", [Track])` — fetches a single track via `sp.track()`. Returns the literal folder name `"singles"` so any single-track download lands in `<out>/singles/` regardless of source.
-- Uses `spotipy.SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative`. First run opens a browser for user authorization, caches token to `.spotify_cache`. Why not Client Credentials? See `docs/GOTCHAS.md` — Spotify started returning 401 on `playlist_items` for Client Credentials in 2025.
+- `get_liked_songs(cid, secret) -> ("Liked Songs", list[Track])` — paginates `current_user_saved_tracks(limit=50, offset=N)` until exhausted. Reads `entry["track"] or entry["item"]` for forward-compat (saved-tracks still uses `track`; the rename to `item` happened only on `playlist_items`). Skips null entries (unavailable tracks / podcast episodes). Used by the `spotify:liked` URL sentinel — `main.py`'s dispatcher recognizes that string before any regex and routes here.
+- Uses `spotipy.SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative user-library-read`. The `user-library-read` was appended in 2026 for the picker / liked-songs flow; pre-existing tokens trigger a one-time re-auth on the next saved-tracks call. First run opens a browser for user authorization, caches token to `.spotify_cache`. Why not Client Credentials? See `docs/GOTCHAS.md` — Spotify started returning 401 on `playlist_items` for Client Credentials in 2025.
 
 ### `ytdlp_loader.py`
 
@@ -178,7 +179,14 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 | `POST /api/spotify/authorize` | Triggers the spotipy OAuth flow synchronously. Opens `accounts.spotify.com` in the user's browser, blocks until they authorize, then verifies via `sp.current_user()`. The verify call runs in a worker thread with a 5-minute `t.join` timeout — a stale OAuth tab returns HTTP 504 instead of hanging the request indefinitely. Token cached to `.spotify_cache`. Returns `{status: "authorized", user}`. |
 | `GET /api/spotify/status` | Lightweight check: `{configured: bool, authorized: bool}`. Doesn't validate the cached token over the network. |
 | `POST /api/browse` | Body `{mode: "directory"\|"file", title?, initial?}`. Pops a native tkinter folder/file picker. Used by the dashboard's `[Browse...]` buttons. tkinter dialog runs in the uvicorn worker thread (sync handler) — non-blocking for other endpoints. Returns `{path}` or `{path: null}` on cancel. |
-| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. Spawns `main.py` as a subprocess with `--out=<library_dir.parent> --into=<library_dir.name>` so all downloads merge into the user's currently-viewed library. Also threads `--bpm-min` / `--bpm-max` / `--analysis-seconds` from settings, plus `--ffmpeg-location` if `settings["ffmpeg_path"]` is non-empty. Popen handle stored in `PROCS` dict for cancel. Returns the new job's id + initial state. |
+| `POST /api/jobs` | Body `{url, sources?, bucket_by_bpm?, skip_existing?, key_format?, limit?}`. `url` may be `https://...` for any supported platform OR the literal `spotify:liked` sentinel for the user's Liked Songs. Spawns `main.py` as a subprocess with `--out=<library_dir.parent> --into=<library_dir.name>` so all downloads merge into the user's currently-viewed library. Also threads `--bpm-min` / `--bpm-max` / `--analysis-seconds` from settings, plus `--ffmpeg-location` if `settings["ffmpeg_path"]` is non-empty. Popen handle stored in `PROCS` dict for cancel. Returns the new job's id + initial state. Broadcasts the new job over `/ws/jobs` immediately. |
+| `GET /api/version` | Returns `{current, latest, update_available, release_url, checked, error}`. Queries the GitHub releases API for `HighWalls/TuneHoard` with a 5s timeout and a 60s in-process cache. Never 500s — every exception path collapses to `{checked: false, error: "..."}` so the dashboard banner can poll unconditionally. The `current` field comes from `server.__version__` at the top of `server.py` and is also threaded into `FastAPI(title=..., version=__version__)` so the OpenAPI doc stays in sync. |
+| `GET /api/audio/{track_id:path}` | Streams the MP3 with HTTP Range support so HTML5 `<audio>` can seek without downloading the whole file. 64 KB chunked generator, 206 Partial Content for `Range: bytes=N-M` / `bytes=N-` / `bytes=-N`, 200 + `Accept-Ranges: bytes` for full-file. Uses `:path` converter so IDs like `scan:foo.mp3` (containing `:`) match. Reuses the existing `_find_disk_file` lookup chain. 404 on missing track. |
+| `GET /api/spotify/liked` | `{name: "Liked Songs", url: "spotify:liked", track_count}`. Uses `current_user_saved_tracks(limit=1)["total"]` — doesn't enumerate. 401 if not authorized (creds + `.spotify_cache` both required, matching `/api/spotify/status`'s definition). |
+| `GET /api/spotify/playlists` | `{playlists: [{name, url, track_count, owner}]}`. Paginates `current_user_playlists(limit=50)` 4× = up to 200 entries. Caches `current_user()["id"]` once per request to mark `owner: "you"`. Skips null/empty playlist names (Spotify returns these for some legacy items). 401 if not authorized; 502 on other API errors. |
+| `GET /api/playlists` | Multi-playlist sidebar source: lists immediate sibling subdirs of `library_dir.parent` containing `index.csv`. Track count from naive CSV row count (acceptable approximation; multi-line cells over-count, rare). Returns `{current, parent, playlists: [{name, track_count, is_current}]}`; sorted alphabetically with the current entry kept in alphabetical position (no top-pinning). Returns the empty triple with HTTP 200 when `library_dir` is unset. |
+| `POST /api/library/switch` | Body `{name}`. Switches `library_dir` to `<library_dir.parent>/<name>`. Path-traversal defense is layered: rejects names containing `/`, `\`, or `..`; resolves the candidate via `Path.resolve()` and verifies `candidate.parent == library_dir.parent` (catches symlinks/junctions resolving outside); finally requires `<candidate>/index.csv` to exist. Returns the masked settings dict on success. 400 on any failure. |
+| `WebSocket /ws/jobs` | Server-pushed job state. On accept: sends `{type: "snapshot", jobs: [...]}` immediately so the client renders current state without waiting. On every JOBS state change: `{type: "update", jobs: [...]}` with the same shape as `GET /api/jobs`. Throttled to ~2 Hz on chatty stdout (`job["_last_broadcast"]`), unthrottled on terminal states. The runner thread schedules sends onto the captured uvicorn event loop via `asyncio.run_coroutine_threadsafe`. Client falls back to 10-second HTTP polling if the socket drops. |
 | `GET /api/jobs` | All jobs. `log` is truncated to last 3 lines per entry (full log via `/api/jobs/{id}/log`). |
 | `GET /api/jobs/{id}` / `GET /api/jobs/{id}/log` | Full single-job state / full log tail (default 100 lines, override with `?tail=N`). |
 | `DELETE /api/jobs/{id}` | Cancel a running job. Marks status `cancelled`, calls `_kill_process_tree` (Windows: `taskkill /F /T /PID` so yt-dlp + ffmpeg children don't orphan; POSIX: `terminate` then `kill` after 2s), removes from JOBS. Runner thread guard prevents the `proc.wait()` exit from overwriting the cancelled status with `failed`. |
@@ -193,6 +201,8 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 - `_classify_key_format(s)` — regex match on TKEY values: `\d+[AB]` → `"camelot"`, `[A-G][#b]?m?` → `"musical"`, else None. Imported from `main.py`.
 - `_apply_row_to_disk(row, out_dir, key_format)` — Single-track equivalent of the CLI's bucket-sync pass. Re-tags + renames + re-buckets one MP3 from a row dict. Used by every track-mutation endpoint so dashboard edits behave identically to a `--bucket-by-bpm` CLI run.
 - `_to_dashboard_track(row)` — CSV row → JSON shape. Treats blank/0 BPM as `bucket="unknown-bpm"` rather than letting `bpm_bucket(0)` produce a nonsense range like `"-5-4"`.
+- `_jobs_response()` — produces the dashboard payload (under `JOBS_LOCK`, with internal `_*`-prefixed keys stripped). Single source of truth shared between `GET /api/jobs` and the WS snapshot/update messages.
+- `_broadcast_jobs()` — best-effort push to all connected `/ws/jobs` clients. Schedules `ws.send_json(...)` onto the captured uvicorn event loop via `asyncio.run_coroutine_threadsafe`, so it's safe to call from the runner thread. Silently no-ops if no loop captured (e.g. before the first WS connect, or in tests) or if no clients are connected. Connection set + lock are module-level (`_WS_JOBS_CONNECTIONS`, `_WS_LOCK`); `_WS_LOOP` is captured on first WS accept.
 
 ### Settings model
 
@@ -264,6 +274,54 @@ The filter bar's `Scanned` radio matches tracks where `t.source === ""`. The bac
 ### Failures panel
 
 `<div id="failures-box">` lives between the jobs and library boxes. Hidden via `.hidden` class when the failure count is 0; otherwise shows `~~ FAILED TRACKS (N) ~~` and a list of `× artist — title  [open Spotify]` rows (literal U+00D7 cross, em dash, `.tlink` for the URL). Polls `GET /api/failures` on the same 30s timer that refreshes the library, plus on `window.focus`. Real-time accuracy isn't critical here — a job's failures show up once you tab back to the dashboard.
+
+### Multi-playlist sidebar
+
+`<div id="playlists-sidebar">` is the left rail of a flex container `#library-row` that wraps the existing library tree. Width 240px, `flex-shrink: 0`; the library tree on the right is `flex: 1` with `min-width: 0` so a long bucket row can't push the sidebar off-screen. Header `~~ PLAYLISTS ~~`. Entries show `name (N tracks)` with a `▸` prefix on the current one. Click on a non-current entry → `POST /api/library/switch {name}` → `refreshLibrary` + `refreshFailures` + `refreshPlaylists` + resync of the Settings output-dir input. Auto-hides via `.hidden` class when `≤ 1` playlist is discovered (no point taking up rail space if there's nothing to switch between). Refreshed on page load, on `window.focus`, after job terminal-state transitions (the WS handler diffs prev vs new status), and after Settings library_dir blur.
+
+### Audio preview
+
+A single global `<audio id="audio-player" preload="none">` element sits near the bottom of body. Each `.track-row` has a `[▶]` (`.track-play`) span at the front; click sets `audio.src = '/api/audio/' + encodeURIComponent(id)` and starts playback. Toggling between play/pause on the same row swaps the icon (`▶` ↔ `❚❚`); clicking another row's button stops the previous one. `audio.addEventListener('ended' / 'error', ...)` clears state and re-renders so the icon flips back. The button's handler `e.stopPropagation()`s so it doesn't trigger row-edit/select.
+
+### Spotify picker
+
+`[ Browse Spotify ]` button next to `[ Download >> ]`, hidden until `/api/spotify/status` returns `authorized: true` (synced on initial load + `window.focus`). Click → `Promise.all(getLikedSongs(), getMyPlaylists())` → modal with title `~~ BROWSE SPOTIFY ~~` and a `.sp-pick-list` (max-height 60vh, scrollable). First row `★ Liked Songs (N tracks)`, then `≫ Playlist Name (N tracks) — owner` for each user playlist. Clicking a row writes the URL into `#url`, closes the modal, fires `setStatus()` for preview detection. 401 on either endpoint → close + `showModal({title: 'Not authorized', ...})`. `setStatus()` short-circuits on `spotify:`-prefix URLs and renders `Spotify: Liked Songs` client-side without hitting `/api/preview`.
+
+### Auto-update banner
+
+`<div id="update-banner">` at the very top of body, hidden by default. On page load, after the initial `refreshLibrary` / `refreshJobs` calls, fetches `/api/version`. If `update_available && checked && latest !== localStorage.tunehoard_dismissed_version`, shows the banner with the version string + `[ open release ]` (tlink) + `[ × ]` dismiss. Dismiss writes `r.latest` to localStorage so we don't re-show for the same version. Silent on `error || !checked` — the user doesn't care about failed update checks.
+
+### WebSocket job streaming
+
+`connectJobsWS()` lives inside the integration IIFE. Builds `ws://${host}/ws/jobs` (`wss://` if HTTPS), parses `{type: 'snapshot' | 'update', jobs: [...]}` messages, replaces the local `JOBS` array via length=0/push, calls `renderJobs()`. `onclose` / `onerror` schedule reconnect after 5 seconds. The polling fallback (`setInterval(refreshJobs, 10000)`) runs unconditionally as a safety net — WS does the real work, polling keeps the UI alive if the socket drops permanently. A `data-ws` attribute on `#jobs-label` renders `●` (connected) or `○` (polling-only) via a `::before` pseudo-element so `renderJobs()`'s `label.textContent` rewrites don't wipe it.
+
+## Distribution
+
+Two non-source-tree artifacts ship binary-friendly versions of the app:
+
+### `tunehoard.spec` (PyInstaller)
+
+Onefile spec, entry `server.py`, output `dist/TuneHoard.exe`. Bundles the entire `dashboard/` tree at the same relative path so `FileResponse('dashboard/tunehoard/tunehoard.html')` and the `/static` mount both resolve. Hidden imports cover the librosa lazy-load chain (`numba`, `llvmlite`, `soxr`, `pooch`) and the full `uvicorn.protocols.{http,websockets,lifespan,loops}.*` tree (uvicorn picks protocols by string at runtime via `importlib`; static analysis misses these). `copy_metadata` for `pydantic` + `fastapi` + `uvicorn` so frozen builds don't trip `PackageNotFoundError` on dist-info reads. `console=True` for alpha-friendly tracebacks; flip to `False` once the build is reliably stable.
+
+PyInstaller is *not* in `requirements.txt` — the dev workflow installs it separately, and CI installs it just-in-time.
+
+### `.github/workflows/build.yml`
+
+Triggers on `v*.*.*` tag pushes + `workflow_dispatch`. Three jobs:
+
+- `build-windows` (windows-latest): checkout → setup-python 3.13 → `pip install -r requirements.txt && pip install pyinstaller` → `pyinstaller tunehoard.spec` → rename to `TuneHoard-windows-x64.exe` → upload artifact.
+- `build-macos` (macos-latest): same up to the build, then renames + zips to `TuneHoard-macos-x64.zip` (zip preserves +x; bare binaries lose it on most download paths).
+- `release` (ubuntu-latest, gated on `startsWith(github.ref, 'refs/tags/v')`, `permissions: contents: write`): downloads both artifacts, creates / updates a GitHub Release for the tag via `softprops/action-gh-release@v2` with `generate_release_notes: true`.
+
+Linux is intentionally skipped — librosa+pyinstaller can be brittle there and the dev env is Win11. Add it back when there's demand and bandwidth for testing.
+
+### `app_native.py` (pywebview)
+
+Optional native-window entry point. Imports `server`, runs `uvicorn` on a daemon thread, polls `127.0.0.1:8765` until reachable (5s timeout via `socket.create_connection`), then opens a 1280×800 `webview.create_window(...)` pointed at the dashboard. On window-close: `uvicorn.Server.should_exit = True` triggers graceful shutdown. The daemon thread guarantees process exit on main-thread return regardless.
+
+Self-flagged cleverness: monkey-patches `webbrowser.open` to a no-op *before* importing `server`, so `server.py`'s startup `webbrowser.open(...)` doesn't fight the native window with a duplicate browser tab. Per-process patch, doesn't affect anything else.
+
+The pywebview wrapper is independent of PyInstaller — you can run `python app_native.py` directly from source, OR build with `pyinstaller` against either entry point. The current spec uses `server.py` as entry; switch to `app_native.py` if you want the bundled binary to launch in a native window by default.
 
 ### Custom modal: `showModal({title, body, ok, cancel?, third?})`
 
