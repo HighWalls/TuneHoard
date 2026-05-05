@@ -221,6 +221,30 @@ Edge case: events fired before any client has connected get dropped — `_broadc
 
 On Windows + Python 3.13, FastAPI/uvicorn defaults to `ProactorEventLoop`; `run_coroutine_threadsafe` works fine on it. Worth flagging because Windows event-loop policy *can* bite people who switch to selector-based loops manually.
 
+## Background scan cancel is best-effort
+
+`SCANS[scan_id]["cancelled"] = True` (set by `DELETE /api/library/scan/{id}`) is checked by the worker thread *between* tracks. The currently in-flight `librosa.analyze()` call **cannot be interrupted** — librosa runs in C/Cython under the GIL and ignores Python signals. So a user clicking Cancel during a 3-second analyze sees the scan stop after the current track finishes, not immediately.
+
+This is the same trade-off the synchronous-scan path always had — librosa is the bottleneck, not our scheduling. If you need true interruption, the path is to run the scan in a *subprocess* (like download jobs do) and `taskkill /F /T /PID` it. That's bigger architectural work; we did the threading version because it's simpler and the worst case is "one extra track gets analyzed." Don't try to fix this with `signal.alarm` or `threading._shutdown` — neither does what you want here.
+
+## Port fallback: 8765 → 8770, then exit
+
+`server.py:find_free_port` probes 5 ports starting from `TUNEHOARD_PORT` (or 8765). Picks the first free one. If all 5 are occupied, prints "ports 8765-8770 all in use" and exits 1.
+
+Why a small range and not random: the dashboard URL is bookmarked / pasted into chat / hardcoded in scripts. A random port every launch makes that brittle. 5 retries is enough for most "I left the previous instance running by accident" scenarios.
+
+The chosen port becomes `_CHOSEN_PORT` (module global) which the host-validation middleware closes over. Don't import `server` from a process that doesn't call `main()` and expect the middleware to allow non-default-port requests — the middleware uses the default 8765 if `_CHOSEN_PORT` was never set. Acceptable, since non-`main()` imports are dev-time only.
+
+## Host header validation is the *only* CSRF defense — don't remove
+
+`@app.middleware("http")` rejects mutating requests (POST/PUT/PATCH/DELETE) when the `Host:` header isn't `{127.0.0.1, localhost}:{port}`. WebSocket handlers do their own check at handler entry and `close(code=1008)` on mismatch.
+
+Why: TuneHoard is localhost-only, so true CSRF tokens are overkill. The realistic attack is *DNS rebinding* — a malicious page resolves its own hostname to `127.0.0.1` after the user's browser caches the resolution, then makes cross-origin requests. The browser sends `Host: malicious.example.com` in those requests, and our middleware catches it.
+
+If you ever expose the dashboard beyond localhost (Tailscale, ngrok, etc.) you must add a real CSRF token + same-origin policy or auth before doing so. Don't just remove the host check thinking "it's only localhost-blocking, doesn't matter for remote use" — that path leads to *both* DNS rebinding AND remote CSRF being open at the same time.
+
+GET / HEAD / OPTIONS pass through unconditionally because they don't mutate state. The audio preview's Range requests work fine (they're GETs).
+
 ## Spotify scope expansion: existing tokens silently work, new endpoints prompt re-auth
 
 The OAuth scope list grew from `playlist-read-private playlist-read-collaborative` to also include `user-library-read` in 2026 for the Liked Songs picker. Pre-existing `.spotify_cache` tokens lack the new scope. Spotipy detects scope mismatch on the next `get_authorization_url(...)` call and re-prompts the user — there's no manual cache invalidation needed.
