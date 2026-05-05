@@ -88,6 +88,56 @@ def get_track(
     return "singles", [_spotify_track_to_track(t)]
 
 
+def get_liked_songs(
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str = "http://127.0.0.1:8888/callback",
+    cache_path: str | Path = ".spotify_cache",
+) -> tuple[str, list[Track]]:
+    """Fetch the authenticated user's Liked Songs (saved tracks).
+
+    Returns ("Liked Songs", tracks) — the literal folder name is hard-coded
+    here (it's not user-namable on Spotify's side) and the user-library-read
+    scope is already included in `_spotify_client`.
+
+    Note: saved-tracks entries still carry the track payload under `entry["track"]`
+    (the 2025 `playlist_items` rename to `item` did not propagate here). We read
+    `entry.get("track") or entry.get("item")` for forward-compat.
+    """
+    sp = _spotify_client(client_id, client_secret, redirect_uri, cache_path)
+
+    tracks: list[Track] = []
+    offset = 0
+    page_size = 50
+    while True:
+        results = sp.current_user_saved_tracks(limit=page_size, offset=offset)
+        items = (results or {}).get("items") or []
+        if not items:
+            break
+        for entry in items:
+            if not entry:
+                continue
+            t = entry.get("track") or entry.get("item")
+            # Spotify returns null tracks for unavailable / removed entries.
+            if not t or t.get("type") == "episode" or not t.get("id"):
+                continue
+            tracks.append(
+                Track(
+                    spotify_id=t["id"],
+                    title=t["name"],
+                    artists=[a["name"] for a in t["artists"]],
+                    album=t["album"]["name"],
+                    duration_ms=t["duration_ms"],
+                    isrc=(t.get("external_ids") or {}).get("isrc"),
+                )
+            )
+        if len(items) < page_size or not results.get("next"):
+            break
+        offset += page_size
+
+    return "Liked Songs", tracks
+
+
 def get_playlist_tracks(
     playlist_url: str,
     client_id: str,

@@ -42,7 +42,7 @@ from tqdm import tqdm
 from analyzer import analyze
 from camelot import musical_key_short
 from downloader import download_track, download_url
-from spotify_client import Track, get_playlist_tracks, get_track
+from spotify_client import Track, get_liked_songs, get_playlist_tracks, get_track
 from tagger import tag_file
 from ytdlp_loader import get_ytdlp_tracks, is_soundcloud_url, is_youtube_url
 
@@ -472,7 +472,19 @@ def main() -> int:
             sys.exit(f"Invalid source '{s}' — must be 'youtube' or 'soundcloud'")
 
     url = args.url
-    if is_youtube_url(url):
+    # Sentinel from the dashboard's Spotify picker. Must be checked BEFORE the
+    # generic spotify regex below — it's not a real URL, just a magic string.
+    if url.strip().lower() == "spotify:liked":
+        cid = os.getenv("SPOTIFY_CLIENT_ID")
+        cs = os.getenv("SPOTIFY_CLIENT_SECRET")
+        if not cid or not cs:
+            sys.exit(
+                "Missing SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET "
+                "(copy .env.example to .env). Not required for YouTube/SoundCloud URLs."
+            )
+        print("Fetching Spotify Liked Songs...")
+        playlist_name, tracks = get_liked_songs(cid, cs)
+    elif is_youtube_url(url):
         print("Fetching from YouTube...")
         playlist_name, tracks = get_ytdlp_tracks(url, "yt")
     elif is_soundcloud_url(url):
