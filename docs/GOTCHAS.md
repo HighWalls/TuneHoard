@@ -221,16 +221,6 @@ Edge case: events fired before any client has connected get dropped — `_broadc
 
 On Windows + Python 3.13, FastAPI/uvicorn defaults to `ProactorEventLoop`; `run_coroutine_threadsafe` works fine on it. Worth flagging because Windows event-loop policy *can* bite people who switch to selector-based loops manually.
 
-## /api/library/switch path-traversal defense is layered, not single-checked
-
-The endpoint accepts a playlist `name` and resolves it as a sibling subfolder of `library_dir.parent`. The defense:
-
-1. **String reject:** names containing `/`, `\`, `..`, or that are empty / `.` are rejected up front with HTTP 400.
-2. **Resolve + parent check:** `(library_dir.parent / name).resolve()` is computed; if `candidate.parent != library_dir.parent.resolve()`, it's rejected. This catches NTFS junctions, symlinks, or any path that resolves elsewhere on disk.
-3. **CSV existence:** finally `<candidate>/index.csv` must exist. Without this the endpoint would happily switch to an empty directory.
-
-Don't simplify any one of these away — each catches a different attack class. Step 1 catches naive `../` strings, step 2 catches symlink games, step 3 prevents the user from "switching" into garbage state via the API. The endpoint isn't exposed to untrusted clients in the current model (localhost-only), but the defense is cheap and makes future networked deploys safer.
-
 ## Spotify scope expansion: existing tokens silently work, new endpoints prompt re-auth
 
 The OAuth scope list grew from `playlist-read-private playlist-read-collaborative` to also include `user-library-read` in 2026 for the Liked Songs picker. Pre-existing `.spotify_cache` tokens lack the new scope. Spotipy detects scope mismatch on the next `get_authorization_url(...)` call and re-prompts the user — there's no manual cache invalidation needed.

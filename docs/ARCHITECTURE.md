@@ -184,8 +184,6 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 | `GET /api/audio/{track_id:path}` | Streams the MP3 with HTTP Range support so HTML5 `<audio>` can seek without downloading the whole file. 64 KB chunked generator, 206 Partial Content for `Range: bytes=N-M` / `bytes=N-` / `bytes=-N`, 200 + `Accept-Ranges: bytes` for full-file. Uses `:path` converter so IDs like `scan:foo.mp3` (containing `:`) match. Reuses the existing `_find_disk_file` lookup chain. 404 on missing track. |
 | `GET /api/spotify/liked` | `{name: "Liked Songs", url: "spotify:liked", track_count}`. Uses `current_user_saved_tracks(limit=1)["total"]` — doesn't enumerate. 401 if not authorized (creds + `.spotify_cache` both required, matching `/api/spotify/status`'s definition). |
 | `GET /api/spotify/playlists` | `{playlists: [{name, url, track_count, owner}]}`. Paginates `current_user_playlists(limit=50)` 4× = up to 200 entries. Caches `current_user()["id"]` once per request to mark `owner: "you"`. Skips null/empty playlist names (Spotify returns these for some legacy items). 401 if not authorized; 502 on other API errors. |
-| `GET /api/playlists` | Multi-playlist sidebar source: lists immediate sibling subdirs of `library_dir.parent` containing `index.csv`. Track count from naive CSV row count (acceptable approximation; multi-line cells over-count, rare). Returns `{current, parent, playlists: [{name, track_count, is_current}]}`; sorted alphabetically with the current entry kept in alphabetical position (no top-pinning). Returns the empty triple with HTTP 200 when `library_dir` is unset. |
-| `POST /api/library/switch` | Body `{name}`. Switches `library_dir` to `<library_dir.parent>/<name>`. Path-traversal defense is layered: rejects names containing `/`, `\`, or `..`; resolves the candidate via `Path.resolve()` and verifies `candidate.parent == library_dir.parent` (catches symlinks/junctions resolving outside); finally requires `<candidate>/index.csv` to exist. Returns the masked settings dict on success. 400 on any failure. |
 | `WebSocket /ws/jobs` | Server-pushed job state. On accept: sends `{type: "snapshot", jobs: [...]}` immediately so the client renders current state without waiting. On every JOBS state change: `{type: "update", jobs: [...]}` with the same shape as `GET /api/jobs`. Throttled to ~2 Hz on chatty stdout (`job["_last_broadcast"]`), unthrottled on terminal states. The runner thread schedules sends onto the captured uvicorn event loop via `asyncio.run_coroutine_threadsafe`. Client falls back to 10-second HTTP polling if the socket drops. |
 | `GET /api/jobs` | All jobs. `log` is truncated to last 3 lines per entry (full log via `/api/jobs/{id}/log`). |
 | `GET /api/jobs/{id}` / `GET /api/jobs/{id}/log` | Full single-job state / full log tail (default 100 lines, override with `?tail=N`). |
@@ -210,7 +208,7 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 
 `library_dir` is the **single source of truth** for the user's "where do my files live" choice — it serves as both the download destination (via `--out=<parent> --into=<name>` when spawning `main.py`) and the library tree's source. The earlier `output_dir` / `library_dir` split was confusing and got merged in May 2026; old configs are migrated automatically: if `library_dir` is empty and `output_dir` is set, the value is folded in and `output_dir` is dropped. `save_settings` strips `output_dir` on every write so it can never come back.
 
-For multi-playlist support later, the schema is the same — we'd just walk the parent and merge multiple CSVs, tagging each row with its source playlist. Not done yet.
+A multi-playlist sidebar that walked `library_dir.parent` for sibling CSVs was prototyped and removed. The schema (`parent/<name>/index.csv`) supports it, but the UX wasn't worth the additional surface area — switching playlists by editing `library_dir` in Settings is rare and explicit enough.
 
 ## Dashboard (`dashboard/tunehoard/tunehoard.html`)
 
@@ -274,10 +272,6 @@ The filter bar's `Scanned` radio matches tracks where `t.source === ""`. The bac
 ### Failures panel
 
 `<div id="failures-box">` lives between the jobs and library boxes. Hidden via `.hidden` class when the failure count is 0; otherwise shows `~~ FAILED TRACKS (N) ~~` and a list of `× artist — title  [open Spotify]` rows (literal U+00D7 cross, em dash, `.tlink` for the URL). Polls `GET /api/failures` on the same 30s timer that refreshes the library, plus on `window.focus`. Real-time accuracy isn't critical here — a job's failures show up once you tab back to the dashboard.
-
-### Multi-playlist sidebar
-
-`<div id="playlists-sidebar">` is the left rail of a flex container `#library-row` that wraps the existing library tree. Width 240px, `flex-shrink: 0`; the library tree on the right is `flex: 1` with `min-width: 0` so a long bucket row can't push the sidebar off-screen. Header `~~ PLAYLISTS ~~`. Entries show `name (N tracks)` with a `▸` prefix on the current one. Click on a non-current entry → `POST /api/library/switch {name}` → `refreshLibrary` + `refreshFailures` + `refreshPlaylists` + resync of the Settings output-dir input. Auto-hides via `.hidden` class when `≤ 1` playlist is discovered (no point taking up rail space if there's nothing to switch between). Refreshed on page load, on `window.focus`, after job terminal-state transitions (the WS handler diffs prev vs new status), and after Settings library_dir blur.
 
 ### Audio preview
 

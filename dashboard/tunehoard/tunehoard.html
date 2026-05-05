@@ -669,15 +669,7 @@ hr.tilde::before{
     <div class="box-body" id="failures-body"></div>
   </div>
 
-  <!-- LIBRARY (with optional playlists sidebar on the left) -->
-  <div id="library-row" style="display:flex; gap:8px; align-items:flex-start;">
-  <div id="playlists-sidebar" class="box hidden" style="width:240px; flex-shrink:0; align-self:stretch;">
-    <div class="box-title">
-      <span class="label">~~ PLAYLISTS ~~</span>
-    </div>
-    <div class="box-body" id="playlists-body" style="padding:8px 10px;"></div>
-  </div>
-  <div id="lib-box-wrapper" style="flex:1; min-width:0;">
+  <!-- LIBRARY -->
   <div class="box">
     <div class="box-title">
       <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
@@ -725,8 +717,6 @@ hr.tilde::before{
       </div>
     </div>
   </div>
-  </div><!-- /lib-box-wrapper -->
-  </div><!-- /library-row -->
 
   <div class="footer">
     <div>TuneHoard v0.1 · github.com/HighWalls/TuneHoard</div>
@@ -2361,7 +2351,6 @@ $('#w-continue').addEventListener('click', async ()=>{
     catch(err){ toast('save failed: ' + err.message); return; }
     if($('#s-out')) $('#s-out').value = out;
     if(window.API.refreshLibrary) await window.API.refreshLibrary();
-    if(window.API.refreshPlaylists) await window.API.refreshPlaylists();
   }
   localStorage.setItem(WELCOME_KEY, '1');
   $('#welcome-overlay').classList.add('hidden');
@@ -2469,13 +2458,6 @@ $('#w-continue').addEventListener('click', async ()=>{
     async getVersion(){ return jfetch('/api/version'); },
     async getLikedSongs(){ return jfetch('/api/spotify/liked'); },
     async getMyPlaylists(){ return jfetch('/api/spotify/playlists'); },
-    async getPlaylists(){ return jfetch('/api/playlists'); },
-    async switchPlaylist(name){
-      return jfetch('/api/library/switch', {
-        method: 'POST',
-        body: JSON.stringify({name}),
-      });
-    },
     async refreshJobs(){
       try{
         const jobs = await API.listJobs();
@@ -2566,78 +2548,6 @@ $('#w-continue').addEventListener('click', async ()=>{
   }
   API.refreshFailures = refreshFailures;
 
-  // ---------- playlists sidebar ----------
-  // Lists sibling folders of library_dir that contain an index.csv. Click an
-  // entry to switch the active library. Hidden when there are 0 or 1 playlists
-  // — no point taking up horizontal space if there's nothing to choose.
-  let PLAYLISTS = [];
-  let PLAYLISTS_CURRENT = null;
-  function renderPlaylists(){
-    const sidebar = document.getElementById('playlists-sidebar');
-    const body = document.getElementById('playlists-body');
-    if(!sidebar || !body) return;
-    if(!PLAYLISTS || PLAYLISTS.length <= 1){
-      sidebar.classList.add('hidden');
-      body.innerHTML = '';
-      return;
-    }
-    sidebar.classList.remove('hidden');
-    body.innerHTML = PLAYLISTS.map(p => {
-      const isCur = !!p.is_current;
-      const prefix = isCur ? '> ' : '&nbsp;&nbsp;';
-      const nm = escapeHtml(p.name || '');
-      const ct = Number(p.track_count || 0);
-      // active row: bold + the > arrow. Non-active rows are tlinks.
-      if(isCur){
-        return `<div class="pl-row pl-current" data-name="${nm}" `
-          + `style="padding:2px 0; font-weight:600; cursor:default;">`
-          + `${prefix}${nm} <span class="muted">(${ct})</span></div>`;
-      }
-      return `<div class="pl-row" data-name="${nm}" style="padding:2px 0;">`
-        + `<a class="tlink pl-link" data-name="${nm}">${prefix}${nm}</a>`
-        + ` <span class="muted">(${ct})</span></div>`;
-    }).join('');
-  }
-  async function refreshPlaylists(){
-    try{
-      const r = await API.getPlaylists();
-      PLAYLISTS = Array.isArray(r && r.playlists) ? r.playlists : [];
-      PLAYLISTS_CURRENT = (r && r.current) || null;
-      renderPlaylists();
-    } catch(err){
-      // older server / no library — silently leave sidebar hidden
-      PLAYLISTS = [];
-      renderPlaylists();
-    }
-  }
-  API.refreshPlaylists = refreshPlaylists;
-  document.getElementById('playlists-body').addEventListener('click', async (e) => {
-    const a = e.target.closest('.pl-link');
-    if(!a) return;
-    e.preventDefault();
-    const name = a.dataset.name;
-    if(!name || name === PLAYLISTS_CURRENT) return;
-    try{
-      await API.switchPlaylist(name);
-      // Repopulate library + failures from the new folder, then update the
-      // sidebar highlight.
-      await API.refreshLibrary();
-      await refreshFailures();
-      await refreshPlaylists();
-      // Reflect the change on the Settings page's output-folder input too,
-      // so a user opening Settings doesn't see a stale value.
-      try{
-        const s = await API.getSettings();
-        if(s && s.library_dir && document.getElementById('s-out')){
-          document.getElementById('s-out').value = s.library_dir;
-        }
-      } catch(_){}
-      toast('switched to ' + name);
-    } catch(err){
-      toast('switch failed: ' + (err.message || err));
-    }
-  });
-
   // ---------- WebSocket push for jobs ----------
   // Replaces the 2s polling as the primary refresh path. Polling stays in
   // place at 10s as a safety net so the UI keeps working if the WS dies and
@@ -2705,7 +2615,6 @@ $('#w-continue').addEventListener('click', async ()=>{
         if(anyTerminalTransition){
           if(API.refreshLibrary) API.refreshLibrary();
           if(API.refreshFailures) API.refreshFailures();
-          if(API.refreshPlaylists) API.refreshPlaylists();
         }
       };
       const reconnect = () => {
@@ -2727,7 +2636,6 @@ $('#w-continue').addEventListener('click', async ()=>{
   API.refreshLibrary();
   API.refreshJobs();
   refreshFailures();
-  refreshPlaylists();
   connectJobsWS();
 
   // Polling fallback: 10s instead of 2s. WS does the real work; this keeps
@@ -2742,7 +2650,6 @@ $('#w-continue').addEventListener('click', async ()=>{
     API.refreshLibrary();
     API.refreshJobs();
     refreshFailures();
-    refreshPlaylists();
   });
 
   // Initial settings → DOM sync. Runs once at page load, regardless of
@@ -2802,7 +2709,6 @@ $('#w-continue').addEventListener('click', async ()=>{
         }
         if(id==='s-out' && API.refreshLibrary){
           await API.refreshLibrary();
-          if(API.refreshPlaylists) await API.refreshPlaylists();
           toast('library now showing ' + el.value);
         }
       }
