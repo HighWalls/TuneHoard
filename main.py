@@ -17,6 +17,8 @@ Usage:
         [--bucket-by-bpm] [--reanalyze]
         [--key-format camelot|musical]
         [--migrate-keys]
+        [--bpm-min INT] [--bpm-max INT] [--analysis-seconds INT]
+        [--ffmpeg-location PATH]
 """
 
 import argparse
@@ -96,6 +98,10 @@ def process_track(
     sources: list[str],
     bucket_by_bpm: bool = False,
     key_format: str = "camelot",
+    bpm_min: int = 85,
+    bpm_max: int = 200,
+    analysis_seconds: int = 120,
+    ffmpeg_location: str = "",
 ) -> dict | None:
     """Download track, analyze, tag, rename. Returns None if no source matched.
 
@@ -111,13 +117,15 @@ def process_track(
     used_source: str | None = None
 
     if track.source_url:
-        downloaded = download_url(track.source_url, tmp_dir)
+        downloaded = download_url(track.source_url, tmp_dir, ffmpeg_location=ffmpeg_location)
         if downloaded:
             prefix = track.spotify_id.split(":", 1)[0] if ":" in track.spotify_id else ""
             used_source = {"yt": "youtube", "sc": "soundcloud"}.get(prefix, prefix or "url")
     else:
         for src in sources:
-            downloaded = download_track(track.search_query, tmp_dir, source=src)
+            downloaded = download_track(
+                track.search_query, tmp_dir, source=src, ffmpeg_location=ffmpeg_location
+            )
             if downloaded:
                 used_source = src
                 break
@@ -126,7 +134,9 @@ def process_track(
         return None
 
     try:
-        result = analyze(downloaded)
+        result = analyze(
+            downloaded, bpm_min=bpm_min, bpm_max=bpm_max, duration=analysis_seconds
+        )
     except Exception as e:
         print(f"  ! analysis failed ({e}); keeping file untagged")
         result = None
@@ -301,6 +311,9 @@ def reanalyze_rows(
     out_dir: Path,
     key_format: str = "camelot",
     migrate_keys: bool = False,
+    bpm_min: int = 85,
+    bpm_max: int = 200,
+    analysis_seconds: int = 120,
 ) -> int:
     """Re-run BPM/key analysis on each row's MP3. Updates the row dict in place,
     rewrites ID3 tags, and renames the file if the key/bpm prefix changed.
@@ -318,7 +331,9 @@ def reanalyze_rows(
         if current is None:
             continue
         try:
-            result = analyze(current)
+            result = analyze(
+                current, bpm_min=bpm_min, bpm_max=bpm_max, duration=analysis_seconds
+            )
         except Exception as e:
             tqdm.write(f"  ! reanalyze failed ({e}): {current.name}")
             continue
@@ -421,6 +436,32 @@ def main() -> int:
              "and filename prefix to the chosen --key-format. Without this, "
              "files keep the format they were originally tagged with.",
     )
+    ap.add_argument(
+        "--bpm-min",
+        type=int,
+        default=85,
+        help="Lower BPM clamp for the half/double-time normalizer (default: 85). "
+             "Detected BPMs below this are doubled.",
+    )
+    ap.add_argument(
+        "--bpm-max",
+        type=int,
+        default=200,
+        help="Upper BPM clamp for the half/double-time normalizer (default: 200). "
+             "Detected BPMs above this are halved.",
+    )
+    ap.add_argument(
+        "--analysis-seconds",
+        type=int,
+        default=120,
+        help="Seconds of audio loaded for BPM/key analysis (default: 120). "
+             "Lower = faster scans, higher = more accurate on long intros.",
+    )
+    ap.add_argument(
+        "--ffmpeg-location",
+        default="",
+        help="Path to ffmpeg directory or executable. If unset, yt-dlp uses PATH.",
+    )
     args = ap.parse_args()
     if args.reanalyze:
         args.skip_existing = True
@@ -488,6 +529,9 @@ def main() -> int:
             out_dir,
             key_format=args.key_format,
             migrate_keys=args.migrate_keys,
+            bpm_min=args.bpm_min,
+            bpm_max=args.bpm_max,
+            analysis_seconds=args.analysis_seconds,
         )
         print(f"  → {n_changed}/{len(existing)} rows updated")
 
@@ -503,6 +547,10 @@ def main() -> int:
             sources,
             bucket_by_bpm=args.bucket_by_bpm,
             key_format=args.key_format,
+            bpm_min=args.bpm_min,
+            bpm_max=args.bpm_max,
+            analysis_seconds=args.analysis_seconds,
+            ffmpeg_location=args.ffmpeg_location,
         )
         if row:
             rows.append(row)

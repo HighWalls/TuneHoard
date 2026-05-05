@@ -613,6 +613,15 @@ hr.tilde::before{
     <div class="box-body" id="jobs-body"></div>
   </div>
 
+  <!-- FAILED TRACKS -->
+  <div class="box hidden" id="failures-box">
+    <div class="box-title">
+      <span class="label" id="failures-label">~~ FAILED TRACKS (0) ~~</span>
+      <a class="tlink" id="failures-toggle">[Collapse]</a>
+    </div>
+    <div class="box-body" id="failures-body"></div>
+  </div>
+
   <!-- LIBRARY -->
   <div class="box">
     <div class="box-title">
@@ -623,8 +632,10 @@ hr.tilde::before{
         <input type="text" id="f-search" placeholder="search artist or title...">
         <span class="radio-line" id="f-source">
           <span class="radio on" data-val="all">(•) All</span>
+          <span class="radio" data-val="SP">( ) Spotify</span>
           <span class="radio" data-val="YT">( ) YouTube</span>
           <span class="radio" data-val="SC">( ) SoundCloud</span>
+          <span class="radio" data-val="scanned">( ) Scanned</span>
         </span>
         <span>BPM:&nbsp;<input id="f-bpm-min" type="number" class="bpm" placeholder="___">&nbsp;-&nbsp;<input id="f-bpm-max" type="number" class="bpm" placeholder="___"></span>
         <span class="cam-wrap">Camelot/Key:&nbsp;<span id="cam-chips" class="cam-wrap" style="gap:4px;"></span><input id="f-cam" type="text" class="cam" placeholder="8A/Am" maxlength="4"></span>
@@ -959,6 +970,19 @@ function setStatus(){
   }, 450);
 }
 $('#url').addEventListener('input', setStatus);
+// Accept drag-drop of a URL onto the input. preventDefault on dragover is
+// required for drop to fire. Prefer text/uri-list (the canonical drag MIME
+// for URLs from browsers) but fall back to text/plain (apps that only
+// expose plain text).
+$('#url').addEventListener('dragover', e=>{ e.preventDefault(); });
+$('#url').addEventListener('drop', e=>{
+  e.preventDefault();
+  let v = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain') || '';
+  v = v.trim();
+  if(!v) return;
+  $('#url').value = v;
+  setStatus();
+});
 setStatus();
 
 // ---------- checkboxes ----------
@@ -1212,6 +1236,7 @@ let sourceFilter = 'all';
 let selected = new Set();      // track ids
 let expandedTrack = new Set(); // track ids → edit form open
 let expandedBucket = new Set();// bucket names
+let lastSelectedId = null;     // anchor for shift-click range-select
 
 // Normalize either Camelot ('8A') or musical ('Am') input into the canonical Camelot value.
 const KEY_TO_CAM = (function(){
@@ -1232,7 +1257,15 @@ function passesFilters(t){
   const bMax = parseInt($('#f-bpm-max').value,10);
   const camLive = normalizeKeyInput($('#f-cam').value);
   if(q && !((t.artist+' '+t.title).toLowerCase().includes(q))) return false;
-  if(sourceFilter!=='all' && t.source!==sourceFilter) return false;
+  if(sourceFilter!=='all'){
+    // 'scanned' matches tracks with no recognized source (backend maps unknown
+    // sources — including the 'scanned' sentinel — to an empty string).
+    if(sourceFilter==='scanned'){
+      if(t.source !== '') return false;
+    } else if(t.source !== sourceFilter){
+      return false;
+    }
+  }
   if(!isNaN(bMin) && t.bpm < bMin) return false;
   if(!isNaN(bMax) && t.bpm > bMax) return false;
   // Camelot: chips OR-match. live input also counts (so users can type a single value without pressing Enter).
@@ -1431,16 +1464,34 @@ tree.addEventListener('click', e=>{
     //                  open form, clears multi-selection).
     //   Shift/Ctrl/Cmd-click → toggle multi-selection (closes any open
     //                  edit form, never expands the row).
+    //   Shift-click with a prior anchor (lastSelectedId) on a different row
+    //                → range-select every track from anchor to clicked row
+    //                  in current visual (DOM) order.
     // This keeps the per-row edit form and the bulk-action bar from ever
     // being on screen at the same time.
-    if(e.shiftKey || e.ctrlKey || e.metaKey){
+    if(e.shiftKey && lastSelectedId && lastSelectedId !== id){
+      expandedTrack.clear();
+      const ids = $$('.track-row', tree).map(r => r.dataset.id);
+      const a = ids.indexOf(lastSelectedId);
+      const b = ids.indexOf(id);
+      if(a >= 0 && b >= 0){
+        const lo = Math.min(a,b), hi = Math.max(a,b);
+        for(let i=lo; i<=hi; i++) selected.add(ids[i]);
+      } else {
+        // anchor no longer in DOM (e.g. filtered out) — fall back to plain toggle
+        if(selected.has(id)) selected.delete(id); else selected.add(id);
+      }
+      // do NOT update lastSelectedId — anchor stays so user can extend the range
+    } else if(e.shiftKey || e.ctrlKey || e.metaKey){
       expandedTrack.clear();
       if(selected.has(id)) selected.delete(id); else selected.add(id);
+      lastSelectedId = id;
     } else {
       selected.clear();
       const wasOpen = expandedTrack.has(id);
       expandedTrack.clear();
       if(!wasOpen) expandedTrack.add(id);
+      lastSelectedId = id;
     }
     renderLib();
   }
@@ -2122,6 +2173,28 @@ $('#dl-btn').addEventListener('click', async ()=>{
   if(r.kind==='empty' || r.kind==='bad') return;
   if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')) return;
   if(!window.API){ toast('API not available'); return; }
+  // First-run guard: bail out client-side if no library folder is configured.
+  // The /api/jobs endpoint also rejects this server-side (400), but catching
+  // it here lets us point the user straight at Settings instead of toasting
+  // a raw HTTP error.
+  try{
+    const s = await window.API.getSettings();
+    if(!s || !s.library_dir || !String(s.library_dir).trim()){
+      const open = await showModal({
+        title: 'Set up library folder',
+        body: 'TuneHoard needs to know where to save your downloads.\n\n' +
+              'Pick a folder for your library on the Settings page — that\'s where new tracks will land, and the dashboard\'s library tree reads from the same place.\n\n' +
+              'You can change it later at any time.',
+        ok: 'Open Settings',
+        cancel: 'Cancel',
+      });
+      if(open) showSettings();
+      return;
+    }
+  } catch(err){
+    toast('settings check failed: ' + err.message);
+    return;
+  }
   try{
     const bucketByBpm = $('#cb-bucket')?.classList.contains('on') ?? true;
     const fallback    = $('#cb-fallback')?.classList.contains('on') ?? true;
@@ -2258,6 +2331,7 @@ $('#w-continue').addEventListener('click', async ()=>{
       return jfetch('/api/browse', {method: 'POST', body: JSON.stringify(opts || {})});
     },
     async listJobs(){ return jfetch('/api/jobs'); },
+    async getFailures(){ return jfetch('/api/failures'); },
     async refreshJobs(){
       try{
         const jobs = await API.listJobs();
@@ -2287,17 +2361,80 @@ $('#w-continue').addEventListener('click', async ()=>{
   };
   window.API = API;
 
+  // ---------- failures panel ----------
+  // Surfaces /api/failures (tracks that the downloader couldn't find on any
+  // source). Hidden entirely when there are zero failures. Style mirrors the
+  // active-jobs panel: collapsible header, monospace body.
+  let FAILURES = [];
+  let failuresCollapsed = false;
+  function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+  function renderFailures(){
+    const box = document.getElementById('failures-box');
+    const label = document.getElementById('failures-label');
+    const body = document.getElementById('failures-body');
+    const toggle = document.getElementById('failures-toggle');
+    if(!box || !label || !body || !toggle) return;
+    const n = FAILURES.length;
+    if(n === 0){
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    label.textContent = `~~ FAILED TRACKS (${n}) ~~`;
+    if(failuresCollapsed){
+      toggle.textContent = '[Expand]';
+      body.classList.add('hidden');
+      return;
+    }
+    toggle.textContent = '[Collapse]';
+    body.classList.remove('hidden');
+    body.innerHTML = FAILURES.map((f, i) => {
+      const artist = escapeHtml(f.artist || '');
+      const title = escapeHtml(f.title || '');
+      const url = escapeHtml(f.spotify_url || '');
+      return `<div class="failure-row" style="font-family:var(--mono); display:flex; justify-content:space-between; gap:12px; padding:1px 0;">`
+        + `<span>× ${artist} — ${title}</span>`
+        + `<a class="tlink" data-fail-idx="${i}" data-url="${url}">[open Spotify]</a>`
+        + `</div>`;
+    }).join('');
+  }
+  document.getElementById('failures-toggle').addEventListener('click', ()=>{
+    failuresCollapsed = !failuresCollapsed;
+    renderFailures();
+  });
+  document.getElementById('failures-body').addEventListener('click', e=>{
+    const a = e.target.closest('a[data-fail-idx]');
+    if(!a) return;
+    const url = a.dataset.url;
+    if(url) window.open(url, '_blank', 'noopener');
+  });
+  async function refreshFailures(){
+    try{
+      const list = await API.getFailures();
+      FAILURES = Array.isArray(list) ? list : [];
+      renderFailures();
+    } catch(err){
+      // endpoint may not exist yet on older servers — leave panel hidden
+    }
+  }
+  API.refreshFailures = refreshFailures;
+
   // Initial load: replace mock with real data
   API.refreshLibrary();
   API.refreshJobs();
+  refreshFailures();
 
   // Poll jobs every 2s while the page is open
   setInterval(() => API.refreshJobs(), 2000);
-  // Refresh library every 30s in case the backend changed it independently
-  setInterval(() => API.refreshLibrary(), 30000);
+  // Refresh library + failures every 30s in case the backend changed them
+  // independently (e.g. a job finished and wrote new failures.txt).
+  setInterval(() => { API.refreshLibrary(); refreshFailures(); }, 30000);
 
   // Refresh after a started job completes (cheap heuristic: also refresh on focus)
-  window.addEventListener('focus', () => { API.refreshLibrary(); API.refreshJobs(); });
+  window.addEventListener('focus', () => { API.refreshLibrary(); API.refreshJobs(); refreshFailures(); });
 
   // Initial settings → DOM sync. Runs once at page load, regardless of
   // whether the user has opened the Settings panel yet, because the panel

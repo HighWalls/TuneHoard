@@ -50,27 +50,34 @@ def _detect_key(y: np.ndarray, sr: int) -> tuple[str, str]:
     return f"{root} {mode}", to_camelot(root, mode)
 
 
-def _detect_bpm(y: np.ndarray, sr: int) -> int:
+def _detect_bpm(y: np.ndarray, sr: int, bpm_min: int = 85, bpm_max: int = 200) -> int:
     # start_bpm biases the beat-tracker autocorrelation toward the DJ range.
     # Default is 120; raising to 150 reduces half-time picks on fast tracks
     # (e.g. 166 BPM DnB/trap that librosa otherwise reports as 83).
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr, start_bpm=150)
     bpm = float(np.atleast_1d(tempo)[0])
-    # Clamp to [85, 200]. Upper bound is 200 so genuine D&B / hardcore tracks
-    # (170-200 BPM) don't get halved. Bounds are non-overlapping:
+    # Clamp to [bpm_min, bpm_max]. Default upper bound is 200 so genuine D&B /
+    # hardcore tracks (170-200 BPM) don't get halved. Bounds are non-overlapping
+    # at the defaults:
     #   - doubling < 85 caps at 170, never triggers the halve branch.
     #   - halving > 200 floors at 100, never triggers the double branch.
     # Genuine sub-85 BPM (boom-bap hip-hop) still gets wrongly doubled —
     # override those via index.csv edit + --bucket-by-bpm sync.
-    while bpm < 85:
+    while bpm < bpm_min:
         bpm *= 2
-    while bpm > 200:
+    while bpm > bpm_max:
         bpm /= 2
     return int(round(bpm))
 
 
-def analyze(mp3_path: Path) -> Analysis:
-    y, sr = librosa.load(str(mp3_path), sr=22050, mono=True, duration=120)
-    bpm = _detect_bpm(y, sr)
+def analyze(
+    mp3_path: Path,
+    *,
+    bpm_min: int = 85,
+    bpm_max: int = 200,
+    duration: int = 120,
+) -> Analysis:
+    y, sr = librosa.load(str(mp3_path), sr=22050, mono=True, duration=duration)
+    bpm = _detect_bpm(y, sr, bpm_min=bpm_min, bpm_max=bpm_max)
     key_name, camelot = _detect_key(y, sr)
     return Analysis(bpm=bpm, key_name=key_name, camelot=camelot)

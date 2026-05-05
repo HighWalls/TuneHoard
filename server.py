@@ -286,7 +286,12 @@ def _spawn_job(
         "--into", into_name,
         "--sources", ",".join(sources or s["sources"]),
         "--key-format", key_format,
+        "--bpm-min", str(s["bpm_min"]),
+        "--bpm-max", str(s["bpm_max"]),
+        "--analysis-seconds", str(s["analysis_seconds"]),
     ]
+    if s.get("ffmpeg_path"):
+        args.extend(["--ffmpeg-location", s["ffmpeg_path"]])
     if bucket_by_bpm:
         args.append("--bucket-by-bpm")
     if skip_existing:
@@ -510,6 +515,52 @@ def api_get_library() -> list[dict[str, Any]]:
     return [_to_dashboard_track(r) for r in _read_library()]
 
 
+@app.get("/api/failures")
+def api_get_failures() -> list[dict[str, Any]]:
+    """Read <library_dir>/failures.txt and return parsed failed tracks.
+
+    File format (written by main.py's job runner):
+        # comment lines start with '#'
+        Artist - Title<TAB>https://open.spotify.com/track/<id>
+
+    Lenient parser: malformed lines fall back to artist="" and put the whole
+    left-of-tab into title rather than crashing. Returns [] (with HTTP 200) if
+    library_dir isn't set or failures.txt doesn't exist.
+    """
+    s = load_settings()
+    if not s["library_dir"]:
+        return []
+    fail_path = Path(s["library_dir"]) / "failures.txt"
+    if not fail_path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        text = fail_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Split off the URL on the first TAB.
+        if "\t" in line:
+            left, url = line.split("\t", 1)
+        else:
+            left, url = line, ""
+        left = left.strip()
+        url = url.strip()
+        # Split "Artist - Title" on first ' - '.
+        if " - " in left:
+            artist, title = left.split(" - ", 1)
+            artist = artist.strip()
+            title = title.strip()
+        else:
+            artist = ""
+            title = left
+        out.append({"artist": artist, "title": title, "spotify_url": url})
+    return out
+
+
 def _short_musical_to_full(short: str) -> str:
     """'Am' -> 'A minor', 'C' -> 'C major', 'C#m' -> 'C# minor'.
     Inverse of camelot.musical_key_short(). Empty string for unrecognized."""
@@ -625,7 +676,12 @@ def api_scan_library(
         # If still missing BPM/Camelot AND user asked for analysis, run librosa.
         if analyze_missing and (bpm == "" or not camelot):
             try:
-                result = analyze(mp3)
+                result = analyze(
+                    mp3,
+                    bpm_min=s["bpm_min"],
+                    bpm_max=s["bpm_max"],
+                    duration=s["analysis_seconds"],
+                )
                 if bpm == "":
                     bpm = result.bpm
                 if not camelot:
@@ -782,7 +838,12 @@ def api_reanalyze_track(track_id: str) -> dict[str, Any]:
     current = _find_disk_file(row, by_name, all_paths)
     if current is None:
         raise HTTPException(404, "MP3 file not found on disk")
-    result = analyze(current)
+    result = analyze(
+        current,
+        bpm_min=s["bpm_min"],
+        bpm_max=s["bpm_max"],
+        duration=s["analysis_seconds"],
+    )
     row["bpm"] = str(result.bpm)
     row["camelot"] = result.camelot
     row["key"] = result.key_name
@@ -996,19 +1057,35 @@ def api_spotify_authorize() -> dict[str, Any]:
     """Trigger spotipy's OAuth flow. Opens the user's browser to
     accounts.spotify.com, blocks until they complete the flow (or until
     spotipy's local callback server gives up). Token cached to .spotify_cache.
+
+    Wrapped in a worker thread with a 5-minute join timeout so a user who
+    abandons the browser flow doesn't pin a request handler indefinitely.
     """
     s = load_settings()
     if not s["spotify_client_id"] or not s["spotify_client_secret"]:
         raise HTTPException(400, "Set Spotify Client ID and Secret in Settings first")
-    try:
-        sp = _spotify_client(s["spotify_client_id"], s["spotify_client_secret"])
-        me = sp.current_user()
-        name = me.get("display_name") or me.get("id") or "unknown"
-        return {"status": "authorized", "user": name}
-    except HTTPException:
-        raise
-    except Exception as e:
+
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
+
+    def _do_auth() -> None:
+        try:
+            sp = _spotify_client(s["spotify_client_id"], s["spotify_client_secret"])
+            me = sp.current_user()
+            name = me.get("display_name") or me.get("id") or "unknown"
+            result["user"] = name
+        except BaseException as e:  # capture everything; surface to caller
+            error["e"] = e
+
+    t = threading.Thread(target=_do_auth, daemon=True)
+    t.start()
+    t.join(timeout=300)
+    if t.is_alive():
+        raise HTTPException(504, "authorization timed out — try again from Settings")
+    if "e" in error:
+        e = error["e"]
         raise HTTPException(500, f"authorize failed: {type(e).__name__}: {e}")
+    return {"status": "authorized", "user": result.get("user", "unknown")}
 
 
 @app.get("/api/spotify/status")
