@@ -63,6 +63,10 @@ body{
   overflow:hidden;
 }
 .box-title .label{ font-weight:600; letter-spacing:0.02em; }
+/* WebSocket connection indicator on #jobs-label. data-ws is set by JS to
+   '●' (connected) or '○' (polling-only). Rendered via ::before so it sits
+   outside the textContent the renderer rewrites. */
+#jobs-label[data-ws]::before{ content: attr(data-ws) " "; opacity:0.7; }
 .box-body{ padding:10px 12px; }
 
 /* Buttons */
@@ -2544,13 +2548,82 @@ $('#w-continue').addEventListener('click', async ()=>{
   }
   API.refreshFailures = refreshFailures;
 
+  // ---------- WebSocket push for jobs ----------
+  // Replaces the 2s polling as the primary refresh path. Polling stays in
+  // place at 10s as a safety net so the UI keeps working if the WS dies and
+  // reconnect repeatedly fails (e.g. server restart, proxy weirdness).
+  let WS_JOBS = null;
+  let WS_CONNECTED = false;
+  function setJobsWsIndicator(connected){
+    WS_CONNECTED = connected;
+    const label = document.getElementById('jobs-label');
+    if(!label) return;
+    // Sigil prefix on the panel header — '●' connected, '○' polling-only.
+    // Stripped + re-applied on every state change so the existing renderJobs()
+    // text updates don't have to know about it.
+    const dot = connected ? '●' : '○';
+    if(!label.dataset.wsDot){
+      label.dataset.wsDot = '1';
+    }
+    // Stash the dot in a sibling-of-label way: prepend a span that renderJobs
+    // doesn't touch (it only sets textContent on #jobs-label, which would
+    // wipe the span). Easier: set a data attr the CSS can render via ::before.
+    label.setAttribute('data-ws', dot);
+  }
+  function connectJobsWS(){
+    try{
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = `${proto}//${location.host}/ws/jobs`;
+      const ws = new WebSocket(url);
+      WS_JOBS = ws;
+      ws.onopen = () => { setJobsWsIndicator(true); };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch(e){ return; }
+        if(!msg || (msg.type !== 'snapshot' && msg.type !== 'update')) return;
+        const jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+        const mapped = jobs.map(j => ({
+          id: j.id,
+          source: srcFromUrl(j.url),
+          name: j.url ? '"' + j.url.slice(0, 60) + (j.url.length>60?'…':'') + '"' : '"job"',
+          total: j.total || 1,
+          done: j.done || 0,
+          failed: j.failed || 0,
+          etaSec: j.eta_sec || 0,
+          current: j.current || j.status || '',
+          paused: false,
+          logOpen: (JOBS.find(x=>x.id===j.id) || {}).logOpen || false,
+          log: j.log || [],
+          status: j.status,
+        }));
+        JOBS.length = 0;
+        JOBS.push(...mapped);
+        renderJobs();
+      };
+      const reconnect = () => {
+        setJobsWsIndicator(false);
+        WS_JOBS = null;
+        // Localhost — exponential backoff is overkill. Fixed 5s is fine; the
+        // 10s polling fallback below covers the gap regardless.
+        setTimeout(connectJobsWS, 5000);
+      };
+      ws.onclose = reconnect;
+      ws.onerror = () => { try { ws.close(); } catch(e){} };
+    } catch(err){
+      setJobsWsIndicator(false);
+      setTimeout(connectJobsWS, 5000);
+    }
+  }
+
   // Initial load: replace mock with real data
   API.refreshLibrary();
   API.refreshJobs();
   refreshFailures();
+  connectJobsWS();
 
-  // Poll jobs every 2s while the page is open
-  setInterval(() => API.refreshJobs(), 2000);
+  // Polling fallback: 10s instead of 2s. WS does the real work; this keeps
+  // the UI alive if the WS dies and reconnect attempts are failing.
+  setInterval(() => API.refreshJobs(), 10000);
   // Refresh library + failures every 30s in case the backend changed them
   // independently (e.g. a job finished and wrote new failures.txt).
   setInterval(() => { API.refreshLibrary(); refreshFailures(); }, 30000);

@@ -33,6 +33,7 @@ del _os
 # checks and as the User-Agent for the GitHub releases probe.
 __version__ = "0.1.0"
 
+import asyncio
 import csv
 import json
 import os
@@ -55,7 +56,7 @@ _DONE_RE = re.compile(r"^Done\.\s+(\d+)\s+new")
 
 import spotipy
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -265,10 +266,59 @@ JOBS: dict[str, dict[str, Any]] = {}
 PROCS: dict[str, subprocess.Popen] = {}
 JOBS_LOCK = threading.Lock()
 
+# ── WebSocket push for /ws/jobs ───────────────────────────────────────
+# Connected clients receive a snapshot on connect, then incremental updates
+# whenever JOBS state changes. Polling on /api/jobs is preserved as a fallback.
+_WS_JOBS_CONNECTIONS: set[WebSocket] = set()
+_WS_LOCK = threading.Lock()  # threading (not asyncio) — broadcast is called from
+# the runner thread, which has no event loop of its own.
+_WS_LOOP: asyncio.AbstractEventLoop | None = None  # captured on first WS accept
+
 # /api/version cache. 60-second TTL keeps a refresh-happy user from pounding
 # the GitHub API. Populated lazily on first hit.
 _VERSION_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 _VERSION_CACHE_TTL = 60.0
+
+
+def _jobs_response() -> list[dict[str, Any]]:
+    """Snapshot of JOBS shaped for the dashboard. Same payload as GET /api/jobs.
+    Caller is responsible for thread-safety; this acquires JOBS_LOCK itself."""
+    with JOBS_LOCK:
+        out = []
+        for j in JOBS.values():
+            # Drop internal-only keys (the broadcast throttle stamp) and keep
+            # only the last 3 log lines — full log lives behind /api/jobs/{id}/log.
+            snap = {k: v for k, v in j.items() if not k.startswith("_")}
+            snap["log"] = j["log"][-3:]
+            out.append(snap)
+        return out
+
+
+def _broadcast_jobs() -> None:
+    """Push the current JOBS snapshot to every connected /ws/jobs client.
+
+    Safe to call from any thread. Schedules `ws.send_json(...)` on the captured
+    event loop via `run_coroutine_threadsafe`. If no loop has been captured yet
+    (e.g. nobody has ever connected) this silently no-ops.
+    """
+    try:
+        loop = _WS_LOOP
+        if loop is None:
+            return
+        with _WS_LOCK:
+            conns = list(_WS_JOBS_CONNECTIONS)
+        if not conns:
+            return
+        payload = {"type": "update", "jobs": _jobs_response()}
+        for ws in conns:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.send_json(payload), loop)
+            except Exception:
+                # Best-effort: a dead socket will surface on the next receive_text
+                # in the handler and be removed there. Don't try to fix it here.
+                pass
+    except Exception:
+        pass
 
 
 def _spawn_job(
@@ -336,6 +386,16 @@ def _spawn_job(
         JOBS[job_id] = job
 
     def runner() -> None:
+        # Throttle WS broadcasts during chatty downloads (yt-dlp writes lots of
+        # progress lines per track). Always broadcast on terminal states; that
+        # is handled by callers below using `force=True` instead of this helper.
+        def maybe_broadcast() -> None:
+            now = time.time()
+            last = job.get("_last_broadcast", 0.0)
+            if now - last >= 0.5:
+                job["_last_broadcast"] = now
+                _broadcast_jobs()
+
         try:
             proc = subprocess.Popen(
                 args,
@@ -351,12 +411,14 @@ def _spawn_job(
                 job["status"] = "running"
                 job["pid"] = proc.pid
                 PROCS[job_id] = proc
+            _broadcast_jobs()  # status flipped queued→running; push immediately
             assert proc.stdout is not None
             track_in_progress = False  # True between a "→ Track" and the next track-end signal
             for line in proc.stdout:
                 line = line.rstrip("\r\n")
                 if not line:
                     continue
+                terminal_done = False
                 with JOBS_LOCK:
                     job["log"].append(line)
                     if len(job["log"]) > 2000:
@@ -369,20 +431,19 @@ def _spawn_job(
                         job["current"] = ""
                         job["eta_sec"] = 0
                         job["status"] = "done"
-                        continue
+                        terminal_done = True
 
                     # Total tracks announcement: "  → 'name' (N tracks)"
-                    if "tracks" in line and "(" in line:
+                    elif "tracks" in line and "(" in line:
                         m = _TOTAL_RE.search(line)
                         if m:
                             job["total"] = int(m.group(1))
-                            continue
 
                     # Per-track start: a line that BEGINS with "→ " (no leading
                     # whitespace). Excludes the playlist intro (2-space indent),
                     # bucket-sync info, and the "Index → path" substring in the
                     # Done line (handled above).
-                    if line.startswith("→ "):
+                    elif line.startswith("→ "):
                         # Bumping done on the *next* track start means the previous
                         # one finished. Cap at total to be safe.
                         if track_in_progress:
@@ -397,16 +458,19 @@ def _spawn_job(
                             rate = d / elapsed
                             if rate > 0:
                                 job["eta_sec"] = int((t - d) / rate)
-                        continue
 
                     # Skipped track ("  ! skipped (no match on any source)")
-                    if "skipped" in line:
+                    elif "skipped" in line:
                         job["failed"] += 1
                         if track_in_progress:
                             tot = job.get("total") or 0
                             job["done"] = min(job.get("done", 0) + 1, tot or job.get("done", 0) + 1)
                             track_in_progress = False
-                        continue
+
+                if terminal_done:
+                    _broadcast_jobs()  # always push terminal states
+                else:
+                    maybe_broadcast()  # throttled to ~2 Hz during normal progress
             proc.wait()
             with JOBS_LOCK:
                 job["finished_at"] = time.time()
@@ -418,12 +482,14 @@ def _spawn_job(
                 elif job["status"] == "running":
                     job["status"] = "done"
                 PROCS.pop(job_id, None)
+            _broadcast_jobs()  # final status (done/failed/cancelled)
         except Exception as e:
             with JOBS_LOCK:
                 if job["status"] != "cancelled":
                     job["status"] = "failed"
                 job["log"].append(f"!! server error: {e}")
                 PROCS.pop(job_id, None)
+            _broadcast_jobs()
 
     threading.Thread(target=runner, daemon=True).start()
     return job_id
@@ -942,19 +1008,17 @@ def api_start_job(req: JobReq) -> dict[str, Any]:
         key_format=req.key_format or s["key_format"],
         limit=req.limit,
     )
+    # Broadcast immediately so connected WS clients see the new job appear
+    # without waiting for the runner thread's first stdout line.
+    _broadcast_jobs()
     with JOBS_LOCK:
-        return dict(JOBS[job_id])
+        # Strip internal-only fields (e.g. _last_broadcast) before returning.
+        return {k: v for k, v in JOBS[job_id].items() if not k.startswith("_")}
 
 
 @app.get("/api/jobs")
 def api_list_jobs() -> list[dict[str, Any]]:
-    with JOBS_LOCK:
-        # Return a shallow snapshot — drop the full log to keep it small;
-        # /api/jobs/{id}/log streams the full log.
-        out = []
-        for j in JOBS.values():
-            out.append({**j, "log": j["log"][-3:]})  # tail only
-        return out
+    return _jobs_response()
 
 
 @app.get("/api/jobs/{job_id}")
@@ -962,7 +1026,7 @@ def api_get_job(job_id: str) -> dict[str, Any]:
     with JOBS_LOCK:
         if job_id not in JOBS:
             raise HTTPException(404, "job not found")
-        return dict(JOBS[job_id])
+        return {k: v for k, v in JOBS[job_id].items() if not k.startswith("_")}
 
 
 @app.get("/api/jobs/{job_id}/log")
@@ -1429,7 +1493,45 @@ def api_cancel_job(job_id: str) -> dict[str, Any]:
         JOBS.pop(job_id, None)
         PROCS.pop(job_id, None)
 
+    # Push the post-cancel snapshot so connected WS clients see the job vanish
+    # without waiting on the next poll.
+    _broadcast_jobs()
     return {"id": job_id, "status": "cancelled"}
+
+
+@app.websocket("/ws/jobs")
+async def ws_jobs(ws: WebSocket) -> None:
+    """Push-only stream of JOBS state. Client receives a 'snapshot' on connect,
+    then 'update' messages whenever JOBS state changes (job started, progress,
+    terminal state, cancellation). The server captures the running event loop
+    on first connect so that `_broadcast_jobs()` — called from the runner
+    thread — can schedule sends back onto this loop."""
+    global _WS_LOOP
+    await ws.accept()
+    # Capture the loop from this async context. `get_running_loop()` is the
+    # robust call on Python 3.10+ — `get_event_loop()` is deprecated outside
+    # an async context. Stashing it once is fine: uvicorn runs a single loop
+    # for the lifetime of the server.
+    if _WS_LOOP is None:
+        _WS_LOOP = asyncio.get_running_loop()
+    with _WS_LOCK:
+        _WS_JOBS_CONNECTIONS.add(ws)
+    try:
+        await ws.send_json({"type": "snapshot", "jobs": _jobs_response()})
+        # We don't expect any client→server messages, but receive_text() is the
+        # idiomatic way to await a disconnect: it raises WebSocketDisconnect
+        # when the peer closes. Without this loop we'd return immediately and
+        # the connection would close.
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        # Swallow any other transport-level error; the finally block will clean up.
+        pass
+    finally:
+        with _WS_LOCK:
+            _WS_JOBS_CONNECTIONS.discard(ws)
 
 
 # ── Static dashboard ──────────────────────────────────────────────────
