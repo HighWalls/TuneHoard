@@ -320,13 +320,13 @@ table.lib tbody tr{ cursor:pointer; }
   font-family:var(--mono);
   font-size:13px;
   white-space:pre;
-  padding:10px 0 6px;
+  padding:14px 0 10px;
   user-select:none;
 }
 .tree-line{
   display:flex;
   align-items:baseline;
-  padding:2px 12px;
+  padding:3px 12px;
   cursor:pointer;
   white-space:pre;
 }
@@ -341,7 +341,8 @@ table.lib tbody tr{ cursor:pointer; }
 
 .track-row{
   display:flex;
-  padding:1px 12px 1px 12px;
+  position:relative;             /* anchor for the absolute scrub bar */
+  padding:5px 12px 5px 12px;     /* breathing room: was 1px top/bot */
   white-space:pre;
   cursor:pointer;
 }
@@ -556,28 +557,26 @@ table.lib tbody tr{ cursor:pointer; }
 }
 .sp-pick-search input:focus{ background:var(--ink); color:var(--paper); }
 
-/* Scrub bar — inline progress for the playing track. Hard-edged, monospace. */
+/* Scrub bar — thin progress indicator at the BOTTOM of the playing row.
+   Absolute-positioned so it can't shift the row's horizontal layout when
+   playback starts. The wrapper is 6px tall for a comfy click target; the
+   visible fill is 2px and grows left-to-right via inline width %. */
 .track-scrub{
-  display:inline-block;
-  width:8ch;
-  height:1em;
-  margin-right:1ch;
-  position:relative;
-  vertical-align:middle;
+  position:absolute;
+  left:0; right:0; bottom:0;
+  height:6px;
   cursor:pointer;
-  border:1px solid var(--ink);
-  background:var(--paper);
+  background:transparent;
 }
-.track-row.sel .track-scrub,
-.track-row:hover .track-scrub{ background:var(--paper); border-color:var(--paper); }
 .track-scrub-fill{
   position:absolute;
-  top:0; bottom:0; left:0;
+  left:0; bottom:0;
+  height:2px;
   background:var(--ink);
   pointer-events:none;
 }
-.track-row.sel .track-scrub-fill,
-.track-row:hover .track-scrub-fill{ background:var(--ink); }
+.track-row:hover .track-scrub-fill,
+.track-row.sel .track-scrub-fill{ background:var(--paper); }
 
 /* Now-playing pinned bar — sticky at bottom of viewport */
 .now-playing{
@@ -779,7 +778,6 @@ hr.tilde::before{
       <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
 
       <div class="checkrow">
-        <span class="checkbox on" data-key="bucket">[x] Bucket by BPM</span>
         <span class="checkbox on" data-key="analyze">[x] Analyze after download</span>
         <span class="checkbox on" data-key="skip">[x] Skip existing</span>
       </div>
@@ -809,7 +807,7 @@ hr.tilde::before{
     <div class="box-title">
       <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
     </div>
-    <div class="box-body" style="padding:10px 12px 0;">
+    <div class="box-body" style="padding:14px 16px 6px;">
       <div class="filterbar">
         <input type="text" id="f-search" placeholder="search artist or title...">
         <span class="radio-line" id="f-source">
@@ -874,6 +872,15 @@ hr.tilde::before{
     <div class="row">
       <input id="s-out" class="path-input" type="text" value="">
       <button class="btn" id="s-out-browse">[Browse...]</button>
+    </div>
+  </div>
+
+  <div class="fset">
+    <div class="inset-label">~~ LIBRARY LAYOUT ~~</div>
+    <div style="margin-bottom:10px;">Where new tracks land on disk after a download. Both options analyze BPM + key and write the tags either way; this only changes the folder layout. Toggle at any time — the next bucket-sync pass (re-run any download with this setting changed) will reorganize existing files in place.</div>
+    <div class="row" id="layout-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:4px;">
+      <span class="radio layout on" data-val="bucket">(•) Bucket by BPM &mdash; tracks land in <span class="muted">115-125, 126-135, ...</span> subfolders</span>
+      <span class="radio layout" data-val="flat">( ) Flat &mdash; everything in one folder, BPM is still tagged</span>
     </div>
   </div>
 
@@ -2530,6 +2537,25 @@ $('#keyfmt-row').addEventListener('click', e=>{
     .catch(err => toast('settings save failed: ' + err.message));
 });
 
+// Library layout — bucket-by-bpm vs flat. Persisted to settings; the next
+// download (or any --bucket-by-bpm sync pass) reorganizes existing files in
+// place. Applied to every job submitted from this dashboard.
+let bucketByBpm = true;
+$('#layout-row').addEventListener('click', e=>{
+  const r = e.target.closest('.layout'); if(!r) return;
+  const val = r.dataset.val;
+  const next = (val === 'bucket');
+  if(next === bucketByBpm) return;
+  bucketByBpm = next;
+  $$('.layout', $('#layout-row')).forEach(x=>{
+    const on = x.dataset.val === val;
+    x.classList.toggle('on', on);
+    x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
+  });
+  if(window.API) window.API.patchSettings({bucket_by_bpm: bucketByBpm})
+    .catch(err => toast('settings save failed: ' + err.message));
+});
+
 // Migrate button: explicit one-shot retag/rename of the entire library to
 // match the chosen format. Triggered manually only — the radio above never
 // fires this on its own.
@@ -2783,9 +2809,13 @@ $('#dl-btn').addEventListener('click', async ()=>{
     return;
   }
   try{
-    const bucketByBpm = $('#cb-bucket')?.classList.contains('on') ?? true;
-    const fallback    = $('#cb-fallback')?.classList.contains('on') ?? true;
-    const skipExist   = $('#cb-skip')?.classList.contains('on') ?? true;
+    // bucket_by_bpm now lives in Settings (Library Layout); the module-level
+    // `bucketByBpm` is kept in sync with /api/settings on load + on radio click.
+    // The other two URL-row checkboxes use data-key attributes (the previous
+    // #cb-X id lookups never matched, so these had been hardcoded true — when
+    // you wire them up, query by [data-key="..."] instead).
+    const fallback  = document.querySelector('[data-key="analyze"]')?.classList.contains('on') ?? true;
+    const skipExist = document.querySelector('[data-key="skip"]')?.classList.contains('on') ?? true;
     await window.API.startJob({
       url: u,
       sources: fallback ? ['youtube','soundcloud'] : ['youtube'],
@@ -3244,6 +3274,15 @@ $('#w-continue').addEventListener('click', async ()=>{
         });
         keyFormat = s.key_format;
         if(typeof renderKeyFmtExample === 'function') renderKeyFmtExample();
+      }
+      if(typeof s.bucket_by_bpm === 'boolean' && $$('.layout').length){
+        bucketByBpm = s.bucket_by_bpm;
+        const want = bucketByBpm ? 'bucket' : 'flat';
+        $$('.layout').forEach(x => {
+          const on = x.dataset.val === want;
+          x.classList.toggle('on', on);
+          x.textContent = x.textContent.replace(/^\([^)]*\)/, on ? '(•)' : '( )');
+        });
       }
       if(Array.isArray(s.sources) && typeof applySourceOrder === 'function'){
         applySourceOrder(s.sources);
