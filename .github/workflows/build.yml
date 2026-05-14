@@ -24,6 +24,21 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # Bundle ffmpeg into the binary so users don't have to install it
+      # themselves. gyan.dev's "essentials" build is LGPL; pinning to release
+      # so the URL stays stable. Unpacked layout:
+      #   ffmpeg-*-essentials_build/bin/ffmpeg.exe
+      - name: Fetch ffmpeg (LGPL)
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/2025-04-28-git-9f4ef62/ffmpeg-2025-04-28-git-9f4ef62-essentials_build.zip'
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-extracted -Force
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          $exe = Get-ChildItem -Path ffmpeg-extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item -Path $exe.FullName -Destination bin/ffmpeg.exe
+          & bin/ffmpeg.exe -version
+
       - name: Build with PyInstaller
         run: pyinstaller tunehoard.spec
 
@@ -55,6 +70,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      # evermeet.cx ships static macOS ffmpeg binaries with stable URLs.
+      # Universal2 build covers both Intel and Apple Silicon.
+      - name: Fetch ffmpeg (LGPL)
+        run: |
+          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/zip
+          unzip -o ffmpeg.zip -d ffmpeg-extracted
+          mkdir -p bin
+          cp ffmpeg-extracted/ffmpeg bin/ffmpeg
+          chmod +x bin/ffmpeg
+          ./bin/ffmpeg -version
 
       - name: Build with PyInstaller
         run: pyinstaller tunehoard.spec

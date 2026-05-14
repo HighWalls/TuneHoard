@@ -1,6 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build:  pyinstaller tunehoard.spec
 # Output: dist/TuneHoard.exe (Windows) / dist/TuneHoard (mac/linux)
+#
+# Optional: drop an `ffmpeg.exe` (Windows) or `ffmpeg` (macOS) into ./bin/
+# before building and PyInstaller will bundle it inside the binary. At runtime
+# the wrapper uses sys._MEIPASS to locate it. CI fetches an LGPL ffmpeg build
+# automatically — local builds can either do the same or ship without
+# (downloads then need ffmpeg on PATH, like the source flow).
+
+import os
+import sys as _sys
+from pathlib import Path as _Path
 
 from PyInstaller.utils.hooks import (
     collect_data_files,
@@ -75,11 +85,25 @@ hiddenimports = [
 hiddenimports += collect_submodules('librosa')
 
 
+# ── Optional bundled ffmpeg ───────────────────────────────────────────
+# If ./bin/ffmpeg(.exe) exists, ship it inside the binary. Lands at
+# sys._MEIPASS/ffmpeg(.exe) at runtime; downloader.py auto-detects it.
+binaries = []
+_ffmpeg_name = 'ffmpeg.exe' if _sys.platform.startswith('win') else 'ffmpeg'
+_ffmpeg_local = _Path('bin') / _ffmpeg_name
+if _ffmpeg_local.is_file():
+    # PyInstaller binaries=[(src, dest_dir)] — '.' = bundle root.
+    binaries.append((str(_ffmpeg_local), '.'))
+    print(f'[tunehoard.spec] bundling ffmpeg from {_ffmpeg_local}')
+else:
+    print(f'[tunehoard.spec] no ffmpeg found at {_ffmpeg_local} — binary will need ffmpeg on PATH')
+
+
 # ── Build graph ───────────────────────────────────────────────────────
 a = Analysis(
     ['server.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

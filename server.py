@@ -29,6 +29,21 @@ _os.environ.setdefault("OMP_NUM_THREADS", "1")
 _os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 del _os
 
+# Frozen-binary entry-point dispatcher. PyInstaller bundles every entry point
+# behind ONE executable (server.py here), so a child process spawned with
+# `subprocess.Popen([sys.executable, "main.py", ...])` would re-launch the
+# bundle as the server, not as main. To work around that, _spawn_job (further
+# down) passes `--main-cli` as argv[1] when frozen, and this dispatcher hands
+# off to main.main() instead of starting uvicorn. argv is rewritten to drop
+# the marker so main.py's argparse sees a normal CLI invocation.
+import sys as _sys
+if len(_sys.argv) > 1 and _sys.argv[1] == "--main-cli":
+    _sys.argv = [_sys.argv[0]] + _sys.argv[2:]
+    import main as _main
+    _main.main()
+    _sys.exit(0)
+del _sys
+
 # Source-of-truth running version. Used by /api/version for upstream-update
 # checks and as the User-Agent for the GitHub releases probe.
 __version__ = "0.1.0"
@@ -395,9 +410,16 @@ def _spawn_job(
     lib_dir = Path(s["library_dir"])
     out_parent = str(lib_dir.parent)
     into_name = lib_dir.name
+    # When running under PyInstaller, sys.executable IS the bundle EXE — a
+    # subprocess of [sys.executable, "main.py", ...] would re-launch the
+    # bundle as the server. Use the --main-cli marker instead; the dispatcher
+    # at the top of this file routes argv[1] == "--main-cli" to main.main().
+    if getattr(sys, "frozen", False):
+        cli_prefix = [sys.executable, "--main-cli"]
+    else:
+        cli_prefix = [sys.executable, str(PROJECT_ROOT / "main.py")]
     args = [
-        sys.executable,
-        str(PROJECT_ROOT / "main.py"),
+        *cli_prefix,
         url,
         "--out", out_parent,
         "--into", into_name,

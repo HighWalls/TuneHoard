@@ -1,8 +1,32 @@
 """yt-dlp wrapper: search YouTube or SoundCloud, or download a known URL, as MP3."""
 
+import sys
 from pathlib import Path
 
 import yt_dlp
+
+
+def bundled_ffmpeg() -> str:
+    """Return the path to a bundled ffmpeg binary when running under PyInstaller.
+
+    The build pipeline places `ffmpeg.exe` (Windows) or `ffmpeg` (macOS) at the
+    bundle root, which PyInstaller extracts to `sys._MEIPASS` at runtime.
+    Source / dev runs return "" (caller falls back to PATH lookup).
+    """
+    if not getattr(sys, "frozen", False):
+        return ""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return ""
+    name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
+    candidate = Path(meipass) / name
+    return str(candidate) if candidate.is_file() else ""
+
+
+def _resolve_ffmpeg(ffmpeg_location: str) -> str:
+    """Explicit caller-provided path wins; else fall back to the bundled binary
+    when frozen; else return empty (PATH lookup)."""
+    return ffmpeg_location or bundled_ffmpeg()
 
 
 def _base_opts(out_dir: Path, ffmpeg_location: str = "") -> dict:
@@ -20,10 +44,11 @@ def _base_opts(out_dir: Path, ffmpeg_location: str = "") -> dict:
             }
         ],
     }
-    if ffmpeg_location:
+    resolved = _resolve_ffmpeg(ffmpeg_location)
+    if resolved:
         # yt-dlp accepts either a directory containing ffmpeg(.exe) or the
         # full path to the executable itself.
-        opts["ffmpeg_location"] = ffmpeg_location
+        opts["ffmpeg_location"] = resolved
     return opts
 
 

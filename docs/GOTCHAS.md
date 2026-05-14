@@ -245,6 +245,35 @@ If you ever expose the dashboard beyond localhost (Tailscale, ngrok, etc.) you m
 
 GET / HEAD / OPTIONS pass through unconditionally because they don't mutate state. The audio preview's Range requests work fine (they're GETs).
 
+## PyInstaller bundle has ONE entry point; `--main-cli` dispatcher routes subprocess jobs
+
+`server.py` spawns `main.py` as a subprocess for every download job (`_spawn_job` → `subprocess.Popen([sys.executable, "main.py", ...])`). This pattern breaks under PyInstaller: in a onefile bundle, `sys.executable` is the bootloader EXE, and re-launching it always runs the bundle's single declared entry point — `server.py`, NOT `main.py`. The first jobs you run from a frozen build would silently spawn fresh server instances.
+
+The fix is the dispatcher block at the top of `server.py` (right after the OPENBLAS env-var setup):
+
+```python
+import sys as _sys
+if len(_sys.argv) > 1 and _sys.argv[1] == "--main-cli":
+    _sys.argv = [_sys.argv[0]] + _sys.argv[2:]
+    import main as _main
+    _main.main()
+    _sys.exit(0)
+```
+
+When `sys.frozen` is true, `_spawn_job` builds its argv as `[sys.executable, "--main-cli", url, ...]` instead of `[sys.executable, "main.py", url, ...]`. The dispatcher strips the marker so `main.main()`'s argparse sees a normal CLI invocation. In source mode (`sys.frozen` unset), the original `main.py` path is used and the dispatcher is never entered.
+
+Two consequences worth knowing about:
+
+1. **Bundle extraction cost per job.** The onefile bundle re-extracts every time you Popen `sys.executable`. That's a 1-3 second hit per job spawn. Acceptable because jobs are minute-scale, but don't try to convert per-track work into separate subprocess calls — you'd pay the extraction tax dozens of times for a single playlist.
+
+2. **`import main` inside the dispatcher.** PyInstaller's static analyzer sees this conditional import and bundles `main` correctly. Don't move it out of the `if` branch thinking lazy import is better — moving it to module top-level would import `main` (and therefore `librosa`) every time the server starts, even when the dispatcher path isn't taken. Lazy is correct here.
+
+## Bundled ffmpeg lives at `sys._MEIPASS`, not next to the EXE
+
+`downloader.bundled_ffmpeg()` resolves the bundled binary via `sys._MEIPASS` (PyInstaller's per-run extraction directory), not `Path(sys.executable).parent`. This matters: onefile bundles run from a temp dir like `%TEMP%/_MEIxxxxxx/` that gets cleaned up on exit; the EXE itself sits wherever the user put it. Don't try to be clever and look next to the EXE — you'll miss the binary that PyInstaller actually packed.
+
+CI fetches LGPL ffmpeg builds (gyan.dev for Windows, evermeet.cx for macOS) into a sibling `bin/` directory before `pyinstaller tunehoard.spec` runs. The spec conditionally appends `bin/ffmpeg(.exe)` to `binaries=` when the file exists — local builds without `bin/ffmpeg` still produce a working (but non-bundled-ffmpeg) binary, falling back to the user's PATH or Settings → Advanced → ffmpeg path.
+
 ## Spotify scope expansion: existing tokens silently work, new endpoints prompt re-auth
 
 The OAuth scope list grew from `playlist-read-private playlist-read-collaborative` to also include `user-library-read` in 2026 for the Liked Songs picker. Pre-existing `.spotify_cache` tokens lack the new scope. Spotipy detects scope mismatch on the next `get_authorization_url(...)` call and re-prompts the user — there's no manual cache invalidation needed.

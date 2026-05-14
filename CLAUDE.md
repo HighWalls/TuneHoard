@@ -2,6 +2,8 @@
 
 Primer for any agent working on **TuneHoard**. Read this first — it's short on purpose.
 
+> **End-user docs live in `README.md`.** This file is for AI agents and contributors who already have the code open. Don't duplicate setup steps here.
+
 ## What this is
 
 TuneHoard is a Python CLI that takes a **Spotify, YouTube, or SoundCloud URL** — playlist *or* single track / video — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
@@ -75,6 +77,10 @@ python app_native.py    # same dashboard, hosted in a 1280×800 pywebview window
 ### Distribution
 
 `tunehoard.spec` is a PyInstaller onefile spec (`pyinstaller tunehoard.spec` → `dist/TuneHoard.exe`). `.github/workflows/build.yml` builds Windows + macOS binaries on every `v*.*.*` tag push and attaches them to the GitHub Release. PyInstaller is *not* in `requirements.txt` — it's installed in CI and as-needed locally.
+
+**Bundled ffmpeg.** CI downloads an LGPL ffmpeg build (gyan.dev on Windows, evermeet.cx on macOS) into `bin/` before invoking PyInstaller; the spec picks it up via `binaries=` and lands it at `sys._MEIPASS` at runtime. `downloader.bundled_ffmpeg()` auto-detects this when `sys.frozen` is set, so the packaged binary works with no system ffmpeg install. Source / dev runs (`sys.frozen` unset) keep the existing PATH-lookup behavior.
+
+**Frozen-binary subprocess dispatch.** `server.py` is the only entry point in the bundle, but `_spawn_job` runs `main.py` as a subprocess. PyInstaller's bootloader re-launches the bundle as the entry point regardless of the requested script — so a naive `[sys.executable, "main.py", ...]` would start the server again. The dispatcher at the top of `server.py` (lines ~32-44) routes `argv[1] == "--main-cli"` to `main.main()` instead; `_spawn_job` uses that marker when `sys.frozen` is set.
 
 ### Setup (either path)
 

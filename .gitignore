@@ -28,3 +28,11 @@ downloads/
 *.mp3
 failures.txt
 
+# PyInstaller artifacts
+build/
+dist/
+*.spec.bak
+
+# Bundled ffmpeg (fetched by CI; gitignored so we don't commit a ~80 MB binary)
+bin/
+
