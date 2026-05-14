@@ -25,17 +25,18 @@ jobs:
           pip install pyinstaller
 
       # Bundle ffmpeg into the binary so users don't have to install it
-      # themselves. gyan.dev's "essentials" build is LGPL; pinning to release
-      # so the URL stays stable. Unpacked layout:
-      #   ffmpeg-*-essentials_build/bin/ffmpeg.exe
+      # themselves. BtbN's auto-built LGPL releases via GitHub's
+      # /releases/latest/download/ redirect — URL stable across versions.
+      # Unpacked layout: ffmpeg-master-latest-win64-lgpl/bin/ffmpeg.exe
       - name: Fetch ffmpeg (LGPL)
         shell: pwsh
         run: |
-          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/2025-04-28-git-9f4ef62/ffmpeg-2025-04-28-git-9f4ef62-essentials_build.zip'
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-lgpl.zip'
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip -MaximumRedirection 5
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-extracted -Force
           New-Item -ItemType Directory -Force -Path bin | Out-Null
           $exe = Get-ChildItem -Path ffmpeg-extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in extracted archive" }
           Copy-Item -Path $exe.FullName -Destination bin/ffmpeg.exe
           & bin/ffmpeg.exe -version
 
