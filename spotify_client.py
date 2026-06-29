@@ -12,6 +12,15 @@ from pathlib import Path
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+# Anchor the OAuth token cache to this module's folder (the project root), NOT
+# the current working directory. A bare ".spotify_cache" resolves relative to
+# CWD, so the dashboard's authorize step, the /api/spotify/* status checks, and
+# the download subprocess could each read/write a *different* file depending on
+# where the server was launched from — making a real authorization look like
+# "not authorized" and Spotify appear completely broken. An absolute path keeps
+# all callers in agreement. (Matches docs/GOTCHAS.md: cached "in the project root".)
+_DEFAULT_CACHE = str(Path(__file__).resolve().parent / ".spotify_cache")
+
 
 @dataclass
 class Track:
@@ -52,7 +61,7 @@ def _spotify_client(
     client_id: str,
     client_secret: str,
     redirect_uri: str = "http://127.0.0.1:8888/callback",
-    cache_path: str | Path = ".spotify_cache",
+    cache_path: str | Path = _DEFAULT_CACHE,
 ) -> spotipy.Spotify:
     auth = SpotifyOAuth(
         client_id=client_id,
@@ -81,7 +90,7 @@ def get_track(
     client_id: str,
     client_secret: str,
     redirect_uri: str = "http://127.0.0.1:8888/callback",
-    cache_path: str | Path = ".spotify_cache",
+    cache_path: str | Path = _DEFAULT_CACHE,
 ) -> tuple[str, list[Track]]:
     sp = _spotify_client(client_id, client_secret, redirect_uri, cache_path)
     t = sp.track(_extract_track_id(track_url))
@@ -92,7 +101,7 @@ def get_liked_songs(
     client_id: str,
     client_secret: str,
     redirect_uri: str = "http://127.0.0.1:8888/callback",
-    cache_path: str | Path = ".spotify_cache",
+    cache_path: str | Path = _DEFAULT_CACHE,
 ) -> tuple[str, list[Track]]:
     """Fetch the authenticated user's Liked Songs (saved tracks).
 
@@ -143,7 +152,7 @@ def get_playlist_tracks(
     client_id: str,
     client_secret: str,
     redirect_uri: str = "http://127.0.0.1:8888/callback",
-    cache_path: str | Path = ".spotify_cache",
+    cache_path: str | Path = _DEFAULT_CACHE,
 ) -> tuple[str, list[Track]]:
     auth = SpotifyOAuth(
         client_id=client_id,
