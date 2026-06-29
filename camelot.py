@@ -28,4 +28,6 @@ def musical_key_short(key_name: str) -> str:
     if len(parts) != 2:
         return key_name
     root, mode = parts
-    return root if mode == "major" else f"{root}m"
+    # Match the mode case-insensitively. An exact `mode == "major"` test would
+    # silently mislabel "C Major" / "C MAJOR" as minor ("Cm").
+    return root if mode.strip().lower().startswith("maj") else f"{root}m"

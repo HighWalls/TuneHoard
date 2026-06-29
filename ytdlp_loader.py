@@ -37,7 +37,11 @@ def _parse_artist_title(raw_title: str, uploader: str) -> tuple[str, str]:
     parts = cleaned.split(" - ", 1)
     if len(parts) == 2 and parts[0].strip() and parts[1].strip():
         return parts[0].strip(), parts[1].strip()
-    return (uploader or "").strip(), cleaned or raw_title.strip()
+    # Noise-stripping can empty the post-separator half (e.g. "Artist - [Official
+    # Audio]" -> "Artist -"), leaving a dangling separator. Trim it so the title
+    # isn't shown/saved as "Artist -".
+    fallback_title = cleaned.strip().rstrip(" -").strip() or raw_title.strip()
+    return (uploader or "").strip(), fallback_title
 
 
 def _entry_to_track(entry: dict, id_prefix: str) -> Track | None:
@@ -72,6 +76,16 @@ def get_ytdlp_tracks(url: str, id_prefix: str) -> tuple[str, list[Track]]:
         "no_warnings": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
+        # A "watch?v=X&list=Y" URL otherwise expands to the entire Mix/playlist Y
+        # instead of the single requested track X. noplaylist=True makes yt-dlp
+        # resolve such URLs to just the video; a bare "/playlist?list=..." has no
+        # anchor video so it still expands as a real playlist.
+        "noplaylist": True,
+        # Bound the listing fetch too — a stalled connection here would hang the
+        # job at "fetching..." with no tracks ever appearing.
+        "socket_timeout": 30,
+        "retries": 5,
+        "extractor_retries": 3,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
