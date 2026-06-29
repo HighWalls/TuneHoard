@@ -36,6 +36,14 @@ def _base_opts(out_dir: Path, ffmpeg_location: str = "") -> dict:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        # Without a socket timeout yt-dlp blocks forever on a stalled read, which
+        # looks like "downloaded the first few tracks then stuck downloading".
+        # Bound every network op and retry transient failures so one bad track
+        # becomes a logged failure instead of freezing the whole run.
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",

@@ -40,7 +40,10 @@ def tag_file(
     tags["TBPM"] = TBPM(encoding=3, text=str(bpm))
 
     musical = musical_key_short(key_name) if key_name else ""
-    tkey_value = musical if key_format == "musical" else camelot
+    # In musical mode, fall back to camelot when the musical form is empty
+    # (missing/odd key_name) so we never write a blank TKEY that DJ software
+    # would display as "no key".
+    tkey_value = (musical or camelot) if key_format == "musical" else camelot
     tags["TKEY"] = TKEY(encoding=3, text=tkey_value)
 
     if camelot:

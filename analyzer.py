@@ -32,6 +32,13 @@ def _detect_key(y: np.ndarray, sr: int) -> tuple[str, str]:
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     mean_chroma = chroma.mean(axis=1)
 
+    # Silent / constant-power audio gives a zero-variance chroma; np.corrcoef
+    # then returns all-NaN and argmax silently picks pitch-class 0 ("C"),
+    # fabricating a confident "C minor"/"5A". Refuse rather than lie — the
+    # caller already tolerates analyze() raising (file is kept untagged).
+    if not np.isfinite(mean_chroma).all() or float(np.ptp(mean_chroma)) == 0.0:
+        raise ValueError("degenerate chroma; key undetectable")
+
     major_scores = np.array(
         [np.corrcoef(np.roll(_MAJOR_PROFILE, i), mean_chroma)[0, 1] for i in range(12)]
     )
@@ -56,6 +63,12 @@ def _detect_bpm(y: np.ndarray, sr: int, bpm_min: int = 85, bpm_max: int = 200) -
     # (e.g. 166 BPM DnB/trap that librosa otherwise reports as 83).
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr, start_bpm=150)
     bpm = float(np.atleast_1d(tempo)[0])
+    # Guard: a silent / corrupt / too-short clip makes librosa report tempo 0
+    # (the doubling loop below would spin forever — 0 * 2 == 0) or NaN (int()
+    # would crash). Either way there's no usable tempo, so signal "undetectable"
+    # and let the caller keep the file untagged instead of hanging/crashing.
+    if not np.isfinite(bpm) or bpm <= 0:
+        raise ValueError(f"undetectable tempo ({bpm!r})")
     # Clamp to [bpm_min, bpm_max]. Default upper bound is 200 so genuine D&B /
     # hardcore tracks (170-200 BPM) don't get halved. Bounds are non-overlapping
     # at the defaults:
@@ -67,6 +80,11 @@ def _detect_bpm(y: np.ndarray, sr: int, bpm_min: int = 85, bpm_max: int = 200) -
         bpm *= 2
     while bpm > bpm_max:
         bpm /= 2
+    # Final hard clamp. With custom bounds that violate bpm_max >= 2*bpm_min the
+    # two loops can leave bpm just outside the window (doubling overshoots max,
+    # then halving drops below min); this guarantees the result is in range so a
+    # bad bound pair can never emit a nonsense BPM (or a negative bucket).
+    bpm = min(max(bpm, bpm_min), bpm_max)
     return int(round(bpm))
 
 
