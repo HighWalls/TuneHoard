@@ -92,6 +92,34 @@ def safe_replace(src: Path, dst: Path, retries: int = 6, delay: float = 0.5) -> 
             time.sleep(delay)
 
 
+def dedupe_path(path: Path) -> Path:
+    """Return a non-colliding destination for `path` by appending ' (N)' to the
+    stem if it's already taken. The filename pattern keys only on
+    camelot/bpm/artist/title, so two DISTINCT tracks (different spotify_id) that
+    share those silently mapped to the same path and os.replace() overwrote one,
+    losing audio. This makes the second land as 'Artist - Title (2).mp3' instead."""
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    n = 2
+    while True:
+        cand = parent / f"{stem} ({n}){suffix}"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+def safe_move(src: Path, dst: Path) -> Path:
+    """Move src->dst without clobbering a DIFFERENT existing file. If dst is
+    occupied by another file, de-collide with a ' (N)' suffix. Returns the final
+    destination path. Used by the bucket-sync rename/move passes so two rows that
+    canonicalize to the same name don't destroy each other's MP3."""
+    if dst.exists() and src.resolve() != dst.resolve():
+        dst = dedupe_path(dst)
+    safe_replace(src, dst)
+    return dst
+
+
 def process_track(
     track: Track,
     out_dir: Path,
@@ -169,6 +197,9 @@ def process_track(
         final_path = bucket_dir / final_name
     else:
         final_path = out_dir / final_name
+    # De-collide so a second distinct track with the same artist/title/bpm/key
+    # doesn't overwrite the first (the row is still added to the CSV either way).
+    final_path = dedupe_path(final_path)
     safe_replace(downloaded, final_path)
 
     return {
@@ -212,7 +243,13 @@ def reconstruct_row_from_disk(track: Track, out_dir: Path) -> dict | None:
             tags = ID3(p)
             if "TBPM" in tags:
                 bpm = int(str(tags["TBPM"].text[0]))
-            if "TKEY" in tags:
+            # Prefer the dedicated Camelot frame; fall back to TKEY only when it
+            # actually holds a Camelot value. Musical-format libraries store
+            # "Am"/"C#m" in TKEY, which must NOT be written into the camelot
+            # column (it would corrupt the CSV + bucket logic).
+            if "TXXX:CAMELOT_KEY" in tags:
+                camelot = str(tags["TXXX:CAMELOT_KEY"].text[0])
+            elif "TKEY" in tags and _classify_key_format(str(tags["TKEY"].text[0])) == "camelot":
                 camelot = str(tags["TKEY"].text[0])
         except (ID3NoHeaderError, ValueError, KeyError):
             pass
@@ -304,9 +341,12 @@ def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) 
     if not (artist and title):
         return None
     suffix = f" - {artist} - {title}.mp3"
-    for p in all_paths:
-        if p.name.endswith(suffix):
-            return p
+    matches = [p for p in all_paths if p.name.endswith(suffix)]
+    if len(matches) == 1:
+        return matches[0]
+    # 0 matches, or AMBIGUOUS (two distinct tracks share artist/title): refuse
+    # rather than guess. Returning an arbitrary match here would let delete/move/
+    # retag operate on the wrong track's MP3.
     return None
 
 
@@ -477,6 +517,15 @@ def main() -> int:
     if args.reanalyze:
         args.skip_existing = True
 
+    # Validate the BPM clamp bounds. The octave normalizer needs a sane,
+    # in-order window; bpm_min <= 0 would make the doubling loop meaningless and
+    # bpm_min >= bpm_max collapses the range.
+    if args.bpm_min <= 0 or args.bpm_max <= 0 or args.bpm_min >= args.bpm_max:
+        sys.exit(
+            f"Invalid BPM bounds: --bpm-min {args.bpm_min} / --bpm-max {args.bpm_max} "
+            "(need 0 < bpm-min < bpm-max)."
+        )
+
     sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     for s in sources:
         if s not in ("youtube", "soundcloud"):
@@ -643,9 +692,12 @@ def main() -> int:
             if current.name != expected_name:
                 new_path = current.parent / expected_name
                 try:
-                    safe_replace(current, new_path)
+                    # safe_move de-collides if a DIFFERENT file already holds the
+                    # canonical name, so two rows that canonicalize alike don't
+                    # overwrite each other.
+                    new_path = safe_move(current, new_path)
                     by_name.pop(current.name, None)
-                    by_name[expected_name] = new_path
+                    by_name[new_path.name] = new_path
                     current = new_path
                     renamed += 1
                 except Exception as e:
@@ -658,9 +710,10 @@ def main() -> int:
                 continue
             target_dir.mkdir(parents=True, exist_ok=True)
             try:
-                safe_replace(current, target_path)
+                target_path = safe_move(current, target_path)
                 by_name.pop(current.name, None)
                 by_name[target_path.name] = target_path
+                row["file"] = target_path.name
                 moved += 1
             except Exception as e:
                 tqdm.write(f"  ! move failed ({e}): {current.name}")
@@ -691,9 +744,19 @@ def main() -> int:
         fail_path = out_dir / "failures.txt"
         with fail_path.open("w", encoding="utf-8") as f:
             f.write(f"# {len(failures)} tracks with no match on any source ({', '.join(sources)}).\n")
-            f.write("# Format: Artist - Title\tSpotify URL\n\n")
+            f.write("# Format: Artist - Title\tURL\n\n")
             for t in failures:
-                url = f"https://open.spotify.com/track/{t.spotify_id}"
+                # spotify_id is a namespaced key: 'yt:<id>'/'sc:<id>' for direct
+                # entries (which carry a real source_url), raw id for Spotify.
+                # Only Spotify ids map to an open.spotify.com/track URL; writing
+                # one for a YT/SC id sends the dashboard's retry to a guaranteed
+                # 404. Prefer the real source URL when we have it.
+                if t.source_url:
+                    url = t.source_url
+                elif ":" in t.spotify_id:
+                    url = t.spotify_id
+                else:
+                    url = f"https://open.spotify.com/track/{t.spotify_id}"
                 f.write(f"{t.primary_artist} - {t.title}\t{url}\n")
         print(f"  ! {len(failures)} failed tracks written to {fail_path}")
 
