@@ -1399,7 +1399,7 @@ function renderJobs(){
     return `
     <div class="job" data-id="${j.id}">
       <div class="job-head">
-        <span class="job-title">${j.source} · ${j.name}</span>
+        <span class="job-title">${escapeHtml(j.source)} · ${escapeHtml(j.name)}</span>
         <span class="job-actions">
           <button class="btn tiny" data-act="cancel">[X]</button>
           <button class="btn tiny" data-act="log">[${j.logOpen ? 'Hide log' : 'Expand log'}]</button>
@@ -1410,7 +1410,7 @@ function renderJobs(){
         <span>ETA: ${fmtETA(j.etaSec)}</span>
         <span>Failed: ${j.failed}</span>
       </div>
-      <div class="job-current">${j.current}<span class="blink">_</span></div>
+      <div class="job-current">${escapeHtml(j.current)}<span class="blink">_</span></div>
       ${logHtml}
     </div>
   `;}).join('');
@@ -1504,6 +1504,7 @@ const BUCKETS = [
   {name:'156-165', min:156, max:165},
   {name:'166-175', min:166, max:175},
   {name:'176-185', min:176, max:185},
+  {name:'186-195', min:186, max:195},
   {name:'196-205', min:196, max:205},
   {name:'unknown-bpm', min:null, max:null},
 ];
@@ -1870,7 +1871,10 @@ function renderLib(){
   // group
   const byBucket = {};
   for(const b of BUCKETS) byBucket[b.name] = [];
-  for(const t of LIB) byBucket[t.bucket].push(t);
+  // Defensive: a backend band the frontend BUCKETS list doesn't know about
+  // (e.g. an out-of-default-range scanned track) would otherwise throw on
+  // .push of undefined and crash the whole library tree. Create the bin on the fly.
+  for(const t of LIB) (byBucket[t.bucket] || (byBucket[t.bucket] = [])).push(t);
   // sort tracks within bucket by camKey
   const camKey = c => { const m=/^(\d{1,2})([AB])$/.exec(c); return m? parseInt(m[1],10)*2+(m[2]==='A'?0:1) : 99; };
   for(const k in byBucket) byBucket[k].sort((a,b)=> camKey(a.cam)-camKey(b.cam) || a.bpm-b.bpm);
@@ -2940,6 +2944,12 @@ $('#w-continue').addEventListener('click', async ()=>{
           if(!t.bucket) t.bucket = bucketFor(t.bpm);
           LIB.push(t);
         }
+        // Prune selection/expansion of ids that no longer exist, else the bulk
+        // bar counts ghost rows and bulk actions fire API calls that 404.
+        const liveIds = new Set(LIB.map(t => t.id));
+        for(const id of [...selected]) if(!liveIds.has(id)) selected.delete(id);
+        for(const id of [...expandedTrack]) if(!liveIds.has(id)) expandedTrack.delete(id);
+        if(lastSelectedId && !liveIds.has(lastSelectedId)) lastSelectedId = null;
         renderLib();
       } catch(err){
         console.error('refreshLibrary failed:', err);
