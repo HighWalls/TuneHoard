@@ -40,8 +40,9 @@ import sys as _sys
 if len(_sys.argv) > 1 and _sys.argv[1] == "--main-cli":
     _sys.argv = [_sys.argv[0]] + _sys.argv[2:]
     import main as _main
-    _main.main()
-    _sys.exit(0)
+    # Propagate main()'s exit code (the source path does `sys.exit(main())`), so
+    # the runner's done/failed classification is identical in frozen builds.
+    _sys.exit(_main.main() or 0)
 del _sys
 
 # Source-of-truth running version. Used by /api/version for upstream-update
@@ -234,7 +235,9 @@ def _find_row(rows: list[dict[str, Any]], track_id: str) -> dict[str, Any] | Non
 
 
 def _disk_index(out_dir: Path) -> tuple[dict[str, Path], list[Path]]:
-    paths = list(out_dir.rglob("*.mp3"))
+    # Exclude _tmp/ — main.py stages partial yt-dlp downloads there; matching a
+    # row to an in-flight temp file would retag/delete/move the wrong thing.
+    paths = [p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts]
     return {p.name: p for p in paths}, paths
 
 
@@ -407,6 +410,21 @@ def _spawn_job(
     # default ("singles" or the playlist title).
     if not s["library_dir"]:
         raise HTTPException(400, "library_dir not configured — open Settings")
+    # A Spotify job whose token isn't cached would make the CLI subprocess block
+    # forever on spotipy's interactive browser OAuth (the subprocess has no
+    # terminal/stdin), which the dashboard shows as a job stuck "downloading"
+    # that never finishes or cancels cleanly. Fail fast with a clear message.
+    # YouTube / SoundCloud need no auth, so they're exempt.
+    needs_spotify = (
+        url.strip().lower() == "spotify:liked"
+        or not (is_youtube_url(url) or is_soundcloud_url(url))
+    )
+    if needs_spotify and not (PROJECT_ROOT / ".spotify_cache").exists():
+        raise HTTPException(
+            400,
+            "Spotify isn't authorized yet — open Settings and click Authorize "
+            "before downloading a Spotify URL.",
+        )
     lib_dir = Path(s["library_dir"])
     out_parent = str(lib_dir.parent)
     into_name = lib_dir.name
@@ -467,11 +485,16 @@ def _spawn_job(
         # Throttle WS broadcasts during chatty downloads (yt-dlp writes lots of
         # progress lines per track). Always broadcast on terminal states; that
         # is handled by callers below using `force=True` instead of this helper.
+        # Throttle stamp is a runner-thread local (was stored on the shared job
+        # dict without the lock, which could add a key mid-iteration and crash a
+        # concurrent /api/jobs reader with "dictionary changed size").
+        last_broadcast = 0.0
+
         def maybe_broadcast() -> None:
+            nonlocal last_broadcast
             now = time.time()
-            last = job.get("_last_broadcast", 0.0)
-            if now - last >= 0.5:
-                job["_last_broadcast"] = now
+            if now - last_broadcast >= 0.5:
+                last_broadcast = now
                 _broadcast_jobs()
 
         try:
@@ -485,10 +508,23 @@ def _spawn_job(
                 encoding="utf-8",
                 errors="replace",
             )
+            cancelled_early = False
             with JOBS_LOCK:
-                job["status"] = "running"
-                job["pid"] = proc.pid
-                PROCS[job_id] = proc
+                # The job may have been cancelled in the window between thread
+                # start and Popen returning. api_cancel_job couldn't kill a proc
+                # that didn't exist yet, so it just popped the job. Detect that
+                # and tear down the freshly-spawned tree instead of orphaning an
+                # uncancellable download.
+                if job_id not in JOBS or job.get("status") == "cancelled":
+                    cancelled_early = True
+                    PROCS.pop(job_id, None)
+                else:
+                    job["status"] = "running"
+                    job["pid"] = proc.pid
+                    PROCS[job_id] = proc
+            if cancelled_early:
+                _kill_process_tree(proc)
+                return
             _broadcast_jobs()  # status flipped queued→running; push immediately
             assert proc.stdout is not None
             track_in_progress = False  # True between a "→ Track" and the next track-end signal
@@ -579,6 +615,20 @@ def _spawn_job(
 app = FastAPI(title="TuneHoard", version=__version__)
 
 
+@app.on_event("shutdown")
+def _kill_inflight_jobs_on_shutdown() -> None:
+    """Reap any in-flight download subprocess trees when the server stops.
+    The daemon runner threads die with the process, but the yt-dlp/ffmpeg
+    children they spawned are independent and would otherwise keep running."""
+    with JOBS_LOCK:
+        procs = list(PROCS.values())
+    for proc in procs:
+        try:
+            _kill_process_tree(proc)
+        except Exception:
+            pass
+
+
 # ── Host header validation (DNS-rebinding guard) ──────────────────────
 # Localhost-only server. We don't issue CSRF tokens (overkill for a single-
 # user local dashboard) but we DO validate `Host:` on every mutating request
@@ -643,6 +693,22 @@ def api_patch_settings(patch: SettingsPatch) -> dict[str, Any]:
     update = patch.model_dump(exclude_unset=True)
     if "key_format" in update and update["key_format"] not in ("camelot", "musical"):
         raise HTTPException(400, "key_format must be 'camelot' or 'musical'")
+    # GET /api/settings returns the secret masked as '********'. If the client
+    # echoes that mask back, drop it so we never overwrite the real stored secret
+    # with asterisks. (The bundled dashboard already guards this client-side; this
+    # makes the server safe for any client.)
+    sec = update.get("spotify_client_secret")
+    if sec is not None and (sec == "" or re.fullmatch(r"\*+", sec)):
+        update.pop("spotify_client_secret")
+    # Validate BPM clamp bounds so a bad pair can't be persisted and break the
+    # octave normalizer (which has no internal validation).
+    merged = {**s, **update}
+    try:
+        bmin, bmax = int(merged["bpm_min"]), int(merged["bpm_max"])
+    except (ValueError, TypeError):
+        raise HTTPException(400, "bpm_min / bpm_max must be integers")
+    if bmin <= 0 or bmax <= 0 or bmin >= bmax:
+        raise HTTPException(400, "need 0 < bpm_min < bpm_max")
     s.update(update)
     save_settings(s)
     return api_get_settings()
@@ -692,10 +758,18 @@ def api_preview(url: str) -> dict[str, Any]:
             cid, cs = s["spotify_client_id"], s["spotify_client_secret"]
             if not cid or not cs:
                 return {"kind": "sp-unconfigured", "label": "Spotify not configured — open Settings"}
+            # No cached token → spotipy would pop a browser OAuth flow and block
+            # this worker. Don't auth implicitly during a debounced preview.
+            if not (PROJECT_ROOT / ".spotify_cache").exists():
+                return {"kind": "sp-unconfigured", "label": "Spotify not authorized — open Settings → Authorize"}
             if "/track/" in url or url.startswith("spotify:track:"):
                 name, tracks = get_track(url, cid, cs)
-            else:
+            elif "/playlist/" in url or url.startswith("spotify:playlist:"):
                 name, tracks = get_playlist_tracks(url, cid, cs)
+            else:
+                # Album / artist / show URLs aren't supported — routing them to
+                # the playlist loader yields a confusing swallowed error instead.
+                return {"kind": "unsupported", "label": "Only Spotify playlist or track URLs are supported"}
             src_label, src_short = "Spotify", "sp"
             single_word = "track"
         else:
@@ -1005,7 +1079,9 @@ def _run_scan_thread(scan_id: str, read_bpm_key: bool, analyze_missing: bool) ->
     try:
         existing_rows = _read_library()
         existing_by_file = {r.get("file"): r for r in existing_rows if r.get("file")}
-        mp3s = sorted(out_dir.rglob("*.mp3"))
+        # Skip _tmp/: main.py stages partial downloads there as {id}.mp3; indexing
+        # those as scan:{id} rows would pollute the library with incomplete files.
+        mp3s = sorted(p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts)
         total = len(mp3s)
         _set(status="running", total=total, progress=0)
         _broadcast_scans()
@@ -1056,6 +1132,15 @@ def _run_scan_thread(scan_id: str, read_bpm_key: bool, analyze_missing: bool) ->
             _set(status="cancelled", finished_at=time.time())
             _broadcast_scans()
             return
+
+        # Preserve CSV rows whose MP3 wasn't seen on disk (renamed/moved outside
+        # the app, stale `file`, temporarily-unmounted drive). _write_library
+        # REPLACES the whole index, so without this the scan would permanently
+        # drop those tracks from index.csv.
+        scanned_names = {p.name for p in mp3s}
+        for r in existing_rows:
+            if r.get("file") and r["file"] not in scanned_names:
+                rows.append(r)
 
         _write_library(rows)
         _set(
@@ -1141,7 +1226,9 @@ def api_scan_library(
     added = 0
     kept = 0
     filled = 0  # existing rows whose blank fields were populated from tags
-    for mp3 in sorted(out_dir.rglob("*.mp3")):
+    # Skip _tmp/ (partial in-flight downloads).
+    mp3s = sorted(p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts)
+    for mp3 in mp3s:
         existing = existing_by_file.get(mp3.name)
 
         # Fast path: cancel branch with an existing row → keep as-is.
@@ -1164,6 +1251,13 @@ def api_scan_library(
             filled += 1
         else:
             kept += 1
+
+    # Preserve CSV rows whose MP3 wasn't on disk so the index-replacing write
+    # below never silently drops tracks (renamed/moved file, stale `file`, etc.).
+    scanned_names = {p.name for p in mp3s}
+    for r in existing_rows:
+        if r.get("file") and r["file"] not in scanned_names:
+            rows.append(r)
 
     _write_library(rows)
     return {
@@ -1268,7 +1362,7 @@ def api_move_track(track_id: str, move: TrackMove) -> dict[str, Any]:
     row = _find_row(rows, track_id)
     if row is None:
         raise HTTPException(404, f"track {track_id} not found in CSV")
-    old_bpm = int(row.get("bpm", 0) or 0)
+    old_bpm = _row_bpm_int(row) or 0  # tolerant: bare int() would 500 on "120.0"/"N/A"
     new_bpm = move.new_bpm
     if new_bpm is None:
         # Replicate the dashboard's auto-pick logic so server-side and client agree.
@@ -1518,8 +1612,15 @@ def api_open_bucket_folder(bucket_name: str) -> dict[str, Any]:
     s = load_settings()
     if not s["library_dir"]:
         raise HTTPException(400, "library_dir not configured")
-    target = Path(s["library_dir"]) / bucket_name
-    if not target.exists():
+    # bucket_name comes straight from the URL path, is joined to library_dir, and
+    # handed to os.startfile() — which on Windows EXECUTES a non-directory target
+    # (.bat/.exe/.lnk). Validate strictly so an encoded '..\..\evil.bat' can't
+    # traverse out of the library and run. Only literal BPM-bucket names pass.
+    if not re.fullmatch(r"\d{1,3}-\d{1,3}|unknown-bpm", bucket_name):
+        raise HTTPException(400, f"invalid bucket name: {bucket_name!r}")
+    lib = Path(s["library_dir"]).resolve()
+    target = (lib / bucket_name).resolve()
+    if target.parent != lib or not target.is_dir():
         raise HTTPException(404, f"bucket folder '{bucket_name}' does not exist")
     try:
         _open_in_file_manager(target)
