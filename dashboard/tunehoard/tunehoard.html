@@ -892,8 +892,8 @@ hr.tilde::before{
     <div class="inset-label">~~ LIBRARY LAYOUT ~~</div>
     <div style="margin-bottom:10px;">Where new tracks land on disk after a download. Both options analyze BPM + key and write the tags either way; this only changes the folder layout. Toggle at any time — the next bucket-sync pass (re-run any download with this setting changed) will reorganize existing files in place.</div>
     <div class="row" id="layout-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:4px;">
-      <span class="radio layout on" data-val="bucket">(•) Bucket by BPM &mdash; tracks land in <span class="muted">115-125, 126-135, ...</span> subfolders</span>
-      <span class="radio layout" data-val="flat">( ) Flat &mdash; everything in one folder, BPM is still tagged</span>
+      <span class="radio layout" data-val="bucket">( ) Bucket by BPM &mdash; tracks land in <span class="muted">115-125, 126-135, ...</span> subfolders</span>
+      <span class="radio layout on" data-val="flat">(•) Flat &mdash; everything in one folder, BPM is still tagged</span>
     </div>
   </div>
 
@@ -2571,7 +2571,7 @@ $('#keyfmt-row').addEventListener('click', e=>{
 // Library layout — bucket-by-bpm vs flat. Persisted to settings; the next
 // download (or any --bucket-by-bpm sync pass) reorganizes existing files in
 // place. Applied to every job submitted from this dashboard.
-let bucketByBpm = true;
+let bucketByBpm = false;
 $('#layout-row').addEventListener('click', e=>{
   const r = e.target.closest('.layout'); if(!r) return;
   const val = r.dataset.val;
