@@ -127,7 +127,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "spotify_client_secret": "",
     "sources": ["youtube", "soundcloud"],
     "key_format": "camelot",
-    "bucket_by_bpm": True,
+    # Flat by default (everything in one playlist folder). Opt into BPM
+    # subfolders via Settings → Library Layout. Matches the CLI, where
+    # --bucket-by-bpm is opt-in.
+    "bucket_by_bpm": False,
     "skip_existing": True,
     "skip_analyze": False,
     "bpm_min": 85,
