@@ -1596,6 +1596,10 @@ let selected = new Set();      // track ids
 let expandedTrack = new Set(); // track ids → edit form open
 let expandedBucket = new Set();// bucket names
 let lastSelectedId = null;     // anchor for shift-click range-select
+// Library Layout: false = flat list, true = BPM-bucket tree. Declared here (not
+// at the layout-toggle wiring below) because renderLib reads it and can run
+// before that later line — a `let` there left it in the temporal dead zone.
+let bucketByBpm = false;       // synced from settings on load
 
 // ---------- audio preview ----------
 // Single global <audio> element drives all per-row play buttons. Only one
@@ -1852,6 +1856,47 @@ function filtersActive(){
 function padR(s,n){ s = String(s); return s.length>=n ? s.slice(0,n) : s + ' '.repeat(n-s.length); }
 function padL(s,n){ s = String(s); return s.length>=n ? s.slice(0,n) : ' '.repeat(n-s.length) + s; }
 
+// One track row (+ its inline edit form if expanded). Shared by the bucketed
+// tree and the flat list so both render identically.
+function trackRowHtml(t){
+  const sel = selected.has(t.id) ? ' sel' : '';
+  const mv = t.moved ? ' moved' : '';
+  const flag = t.moved ? '!!' : '  ';
+  const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
+  const playGlyph = playing ? '❚❚' : '▶';
+  const scrubMarkup = playing
+    ? `<span class="track-scrub"><span class="track-scrub-fill"></span></span>`
+    : '';
+  let h = `<div class="track-row${sel}${mv}" data-id="${t.id}">`
+        + `<span class="track-moved-flag">${flag}</span>`
+        + `<span class="track-play${playing?' playing':''}" data-play="${t.id}" title="${playing?'pause':'play preview'}">${playGlyph}</span>`
+        + scrubMarkup
+        + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
+        + `<span class="track-sep">·</span>`
+        + `<span class="track-bpm">${pad3(t.bpm)}</span>`
+        + `<span class="track-sep">·</span>`
+        + `<span class="track-artist">${escapeHtml(padR(t.artist,16))}</span>`
+        + `<span class="track-sep">·</span>`
+        + `<span class="track-title">${escapeHtml(t.title)}</span>`
+        + `<span class="track-source">[${t.source}]</span>`
+        + `</div>`;
+  if(expandedTrack.has(t.id)){
+    h += `<div class="track-edit" data-edit="${t.id}">`
+       + `<div class="edit-form">`
+       +   `<span class="lbl">Edit:</span>`
+       +   `<span class="lbl">BPM <input type="number" value="${t.bpm}" data-f="bpm"></span>`
+       +   `<span class="lbl">Camelot <input type="text" value="${t.cam}" maxlength="3" style="width:60px;text-transform:uppercase;" data-f="cam"></span>`
+       +   `<span class="lbl">Key <input type="text" value="${t.key}" maxlength="4" style="width:60px;" data-f="key"></span>`
+       +   `<button class="btn" data-act="save">[ Save ]</button>`
+       +   `<button class="btn" data-act="reanalyze">[ Analyze ]</button>`
+       +   `<button class="btn" data-act="open">[ Open in folder ]</button>`
+       +   `<button class="btn" data-act="delete">[ Delete ]</button>`
+       + `</div>`
+       + `</div>`;
+  }
+  return h;
+}
+
 function renderLib(){
   const tree = $('#tree');
   const empty = $('#lib-empty');
@@ -1868,6 +1913,25 @@ function renderLib(){
   const totalShown = LIB.filter(passesFilters).length;
   $('#lib-label').textContent = `~~ LIBRARY (${LIB.length.toLocaleString()} TRACKS${filtersActive()? ' · '+totalShown+' SHOWN':''}) ~~`;
 
+  const camKey = c => { const m=/^(\d{1,2})([AB])$/.exec(c); return m? parseInt(m[1],10)*2+(m[2]==='A'?0:1) : 99; };
+
+  // Flat view: when BPM subfolders are off, don't group into buckets — list
+  // every track straight, sorted by Camelot then BPM. Mirror the bucket path's
+  // filter semantics: only apply passesFilters when a filter is actually active,
+  // otherwise show all (passesFilters can exclude with no active filter).
+  if(!bucketByBpm){
+    const rows = (filtersActive() ? LIB.filter(passesFilters) : LIB.slice())
+      .sort((a,b)=> camKey(a.cam)-camKey(b.cam) || a.bpm-b.bpm);
+    tree.innerHTML = rows.map(trackRowHtml).join('');
+    if(selected.size>0){
+      $('#selbar').classList.remove('hidden');
+      $('#sel-count').textContent = `${selected.size} track${selected.size===1?'':'s'} selected`;
+    } else {
+      $('#selbar').classList.add('hidden');
+    }
+    return;
+  }
+
   // group
   const byBucket = {};
   for(const b of BUCKETS) byBucket[b.name] = [];
@@ -1875,8 +1939,7 @@ function renderLib(){
   // (e.g. an out-of-default-range scanned track) would otherwise throw on
   // .push of undefined and crash the whole library tree. Create the bin on the fly.
   for(const t of LIB) (byBucket[t.bucket] || (byBucket[t.bucket] = [])).push(t);
-  // sort tracks within bucket by camKey
-  const camKey = c => { const m=/^(\d{1,2})([AB])$/.exec(c); return m? parseInt(m[1],10)*2+(m[2]==='A'?0:1) : 99; };
+  // sort tracks within bucket by camKey (camKey declared above, shared with flat view)
   for(const k in byBucket) byBucket[k].sort((a,b)=> camKey(a.cam)-camKey(b.cam) || a.bpm-b.bpm);
 
   // auto-collapse buckets with zero matches when filters active
@@ -1912,43 +1975,7 @@ function renderLib(){
     if(isOpen && !isEmpty){
       const list = filterOn ? matched : all;
       for(const t of list){
-        const sel = selected.has(t.id) ? ' sel' : '';
-        const mv = t.moved ? ' moved' : '';
-        const flag = t.moved ? '!!' : '  ';
-        const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
-        const playGlyph = playing ? '❚❚' : '▶';
-        // Visual-only scrub indicator on the playing row (pointer-events:none).
-        // Real seek control is the np-scrub bar at the bottom of the page.
-        const scrubMarkup = playing
-          ? `<span class="track-scrub"><span class="track-scrub-fill"></span></span>`
-          : '';
-        html += `<div class="track-row${sel}${mv}" data-id="${t.id}">`
-              + `<span class="track-moved-flag">${flag}</span>`
-              + `<span class="track-play${playing?' playing':''}" data-play="${t.id}" title="${playing?'pause':'play preview'}">${playGlyph}</span>`
-              + scrubMarkup
-              + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
-              + `<span class="track-sep">·</span>`
-              + `<span class="track-bpm">${pad3(t.bpm)}</span>`
-              + `<span class="track-sep">·</span>`
-              + `<span class="track-artist">${escapeHtml(padR(t.artist,16))}</span>`
-              + `<span class="track-sep">·</span>`
-              + `<span class="track-title">${escapeHtml(t.title)}</span>`
-              + `<span class="track-source">[${t.source}]</span>`
-              + `</div>`;
-        if(expandedTrack.has(t.id)){
-          html += `<div class="track-edit" data-edit="${t.id}">`
-                + `<div class="edit-form">`
-                +   `<span class="lbl">Edit:</span>`
-                +   `<span class="lbl">BPM <input type="number" value="${t.bpm}" data-f="bpm"></span>`
-                +   `<span class="lbl">Camelot <input type="text" value="${t.cam}" maxlength="3" style="width:60px;text-transform:uppercase;" data-f="cam"></span>`
-                +   `<span class="lbl">Key <input type="text" value="${t.key}" maxlength="4" style="width:60px;" data-f="key"></span>`
-                +   `<button class="btn" data-act="save">[ Save ]</button>`
-                +   `<button class="btn" data-act="reanalyze">[ Analyze ]</button>`
-                +   `<button class="btn" data-act="open">[ Open in folder ]</button>`
-                +   `<button class="btn" data-act="delete">[ Delete ]</button>`
-                + `</div>`
-                + `</div>`;
-        }
+        html += trackRowHtml(t);
       }
     }
   }
@@ -2571,7 +2598,7 @@ $('#keyfmt-row').addEventListener('click', e=>{
 // Library layout — bucket-by-bpm vs flat. Persisted to settings; the next
 // download (or any --bucket-by-bpm sync pass) reorganizes existing files in
 // place. Applied to every job submitted from this dashboard.
-let bucketByBpm = false;
+// (bucketByBpm is declared near the top view-state so renderLib can read it.)
 $('#layout-row').addEventListener('click', e=>{
   const r = e.target.closest('.layout'); if(!r) return;
   const val = r.dataset.val;
