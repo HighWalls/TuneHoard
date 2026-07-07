@@ -3680,12 +3680,15 @@ $('#w-continue').addEventListener('click', async ()=>{
       }
       const playlists = (pls && Array.isArray(pls.playlists)) ? pls.playlists : [];
       for(const p of playlists){
-        const tc = (typeof p.track_count === 'number') ? p.track_count : '?';
+        // No track count here: Spotify's current_user_playlists returns
+        // tracks:null in the list response, so a per-row count would require an
+        // extra API call each. The real count is shown on the URL preview once a
+        // playlist is picked.
         const owner = p.owner ? ` — ${escapeHtml(p.owner)}` : '';
         rows.push({
           idx: nextIdx++,
           name: p.name || '',
-          html: `≫ ${escapeHtml(p.name || '(untitled)')} (${tc} tracks)${owner}`,
+          html: `≫ ${escapeHtml(p.name || '(untitled)')}${owner}`,
           url: p.url,
           cls: '',
         });

@@ -1789,7 +1789,9 @@ def api_spotify_playlists() -> dict[str, Any]:
                 playlists.append({
                     "name": name,
                     "url": (p.get("external_urls") or {}).get("spotify", ""),
-                    "track_count": int(((p.get("tracks") or {}).get("total")) or 0),
+                    # No track_count: current_user_playlists returns tracks:null in
+                    # the list response, so it'd always be 0. The picker shows the
+                    # real count on selection via /api/preview instead.
                     "owner": owner_label,
                 })
             if not result.get("next"):
