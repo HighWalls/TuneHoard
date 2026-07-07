@@ -820,6 +820,11 @@ hr.tilde::before{
   <div class="box">
     <div class="box-title">
       <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
+      <span class="lib-folder-ctl" style="display:flex; align-items:center; gap:8px; min-width:0;">
+        <span class="muted" id="lib-folder-path" title="" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:26ch;"></span>
+        <a class="tlink" id="lib-scan-hdr" title="scan this folder for tracks / analyze missing BPM + key">[ scan / analyze ]</a>
+        <a class="tlink" id="lib-change-folder" title="pick a different library folder to view / download into">[ change folder ]</a>
+      </span>
     </div>
     <div class="box-body" style="padding:14px 16px 6px;">
       <div class="filterbar">
@@ -839,10 +844,10 @@ hr.tilde::before{
 |  -- or --             |
 |                       |
 |  scan the folder for  |
-|  existing MP3s        |
+|  existing tracks      |
 +-----------------------+</pre>
           <div style="margin-top:8px;">
-            <button class="btn" id="lib-scan-btn">[ Scan folder for existing MP3s ]</button>
+            <button class="btn" id="lib-scan-btn">[ Scan folder for existing tracks ]</button>
           </div>
         </div>
       </div>
@@ -936,9 +941,8 @@ hr.tilde::before{
   </div>
 
   <div class="fset">
-    <div class="inset-label">~~ KEY FORMAT (TKEY tag + filename prefix) ~~</div>
-    <div style="margin-bottom:10px;">The on-screen library always shows both Camelot and musical notation. This setting only changes what gets written to the ID3 TKEY tag and the leading chunk of each filename for <b>new downloads</b>. Existing files keep whatever format they were tagged with — use the button below to convert the whole library.<br><br>Whichever format you pick, the COMM tag still carries both forms so the file is portable across DJ software.</div>
-    <div class="row" id="keyfmt-row" style="user-select:none;">
+    <div class="inset-label">~~ KEY FORMAT ~~</div>
+    <div class="row" id="keyfmt-row" style="user-select:none; margin-top:10px;">
       <span class="radio keyfmt on" data-val="camelot">(•) Camelot &mdash; '8A'&nbsp;&nbsp; for Rekordbox</span>
       <span style="width:24px;"></span>
       <span class="radio keyfmt" data-val="musical">( ) Musical &mdash; 'Am'&nbsp;&nbsp; for Traktor / Serato</span>
@@ -2476,6 +2480,32 @@ $('#s-ffmpeg-browse')?.addEventListener('click', ()=>
 $('#w-out-browse')?.addEventListener('click', ()=>
   browseInto($('#w-out'), 'directory', 'Choose output folder'));
 
+// Library section: show the active folder + let the user switch it inline
+// (same folder downloads land in), without a trip to Settings.
+function setLibFolderDisplay(path){
+  const el = $('#lib-folder-path');
+  if(!el) return;
+  const p = (path || '').trim();
+  if(!p){ el.textContent = '(no folder set)'; el.title = 'No library folder configured'; return; }
+  const name = p.replace(/[\\/]+$/,'').split(/[\\/]/).pop() || p;
+  el.textContent = '📁 ' + name;   // 📁 <folder name>
+  el.title = p;                               // full path on hover
+}
+$('#lib-change-folder')?.addEventListener('click', async ()=>{
+  if(!window.API){ toast('API not ready'); return; }
+  try{
+    const cur = ($('#lib-folder-path')?.title) || ($('#s-out')?.value) || '';
+    const r = await window.API.browse({mode:'directory', title:'Choose library folder', initial: cur});
+    if(!r || !r.path) return;                 // user cancelled the picker
+    await window.API.patchSettings({library_dir: r.path});
+    setLibFolderDisplay(r.path);
+    if($('#s-out')) $('#s-out').value = r.path;   // keep the Settings field in sync
+    if(window.API.refreshLibrary) await window.API.refreshLibrary();
+    if(window.API.refreshFailures) window.API.refreshFailures();
+    toast('library folder → ' + r.path);
+  }catch(err){ toast('browse failed: ' + (err.message || err)); }
+});
+
 // settings: Spotify status pill + Authorize flow
 async function refreshSpotifyStatus(){
   const pill = $('#s-status');
@@ -2706,17 +2736,21 @@ $('#src-list').addEventListener('click', e=>{
 // from whatever MP3s already exist in library_dir. BPM/Camelot are left
 // blank by default; user can opt in to reading existing ID3 BPM/key tags
 // or run Analyze on selected tracks afterwards.
-$('#lib-scan-btn')?.addEventListener('click', async ()=>{
+// Scan the current folder for tracks (any audio format). Reusable so it can be
+// triggered from the empty-state button AND the always-visible header button —
+// which is how you run "analyze missing" AFTER a read-tags-only scan.
+async function runScanFolder(btn){
   if(!window.API){ toast('API not ready'); return; }
   const choice = await showModal({
     title: 'Scan folder',
     body:
-      'How should BPM and Camelot key be populated for each MP3?\n\n' +
+      'Reads every audio file in the folder (mp3, flac, wav, m4a, ogg, …).\n' +
+      'How should BPM and Camelot key be filled for each track?\n\n' +
       'Read tags only — use BPM/key already written into the file.\n' +
-      'Tracks with no tags stay unlabeled (you can run Analyze\n' +
-      'on selected tracks later).\n\n' +
+      'Tracks with no tags stay unlabeled — run this again and pick\n' +
+      '"Analyze missing" (or use [ Analyze ] on a row) to fill them later.\n\n' +
       'Analyze missing — read existing tags AND run librosa\n' +
-      '(~3s per track) on tracks that have no BPM/key tag yet.',
+      '(~3s per track) on tracks that have no BPM/key yet.',
     cancel: 'Abort',
     third: 'Read tags only',
     ok: 'Analyze missing',
@@ -2725,10 +2759,8 @@ $('#lib-scan-btn')?.addEventListener('click', async ()=>{
   // OK = "Analyze missing", third = "Read tags only". Both options read tags;
   // analyze_missing also runs librosa for unlabeled tracks.
   const analyzeMissing = choice === true;
-  const btn = $('#lib-scan-btn');
-  btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = '[ Scanning... ]';
+  const orig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '[ Scanning... ]'; }
   try {
     // Both modes read existing tags; analyzeMissing additionally runs librosa.
     const r = await window.API.scanLibrary({
@@ -2748,10 +2780,11 @@ $('#lib-scan-btn')?.addEventListener('click', async ()=>{
   } catch(err){
     toast('scan failed: ' + err.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
+    if(btn){ btn.disabled = false; btn.textContent = orig; }
   }
-});
+}
+$('#lib-scan-btn')?.addEventListener('click', (e)=> runScanFolder(e.currentTarget));
+$('#lib-scan-hdr')?.addEventListener('click', (e)=> runScanFolder(e.currentTarget));
 
 // ---------- bulk actions on selected tracks ----------
 async function runBulk(label, fn){
@@ -3339,6 +3372,7 @@ $('#w-continue').addEventListener('click', async ()=>{
     try{
       const s = await API.getSettings();
       if(s.library_dir && $('#s-out')) $('#s-out').value = s.library_dir;
+      setLibFolderDisplay(s.library_dir || '');
       if(s.ffmpeg_path && $('#s-ffmpeg')) $('#s-ffmpeg').value = s.ffmpeg_path;
       if(s.spotify_client_id && $('#s-cid')) $('#s-cid').value = s.spotify_client_id;
       // don't pre-fill the masked secret
