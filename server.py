@@ -1458,6 +1458,90 @@ def api_reorganize(req: ReorgReq) -> dict[str, Any]:
     return {"moved": moved, "mode": req.mode}
 
 
+# ── In-app folder browser (for the Move popup) ────────────────────────
+@app.get("/api/browse-dirs")
+def api_browse_dirs(path: str = "") -> dict[str, Any]:
+    """List the subfolders of `path` so the dashboard can render its own folder
+    browser (styled like the rest of the app) instead of the native OS dialog.
+    Defaults to the library folder. Read-only; localhost single-user tool."""
+    s = load_settings()
+    base = path.strip() or s.get("library_dir") or str(Path.home())
+    p = Path(base)
+    if not p.exists() or not p.is_dir():
+        p = Path(s.get("library_dir") or Path.home())
+        if not p.is_dir():
+            p = Path.home()
+    p = p.resolve()
+    try:
+        dirs = sorted(
+            ({"name": d.name, "path": str(d)} for d in p.iterdir()
+             if d.is_dir() and not d.name.startswith(".") and d.name != "_tmp"),
+            key=lambda d: d["name"].lower(),
+        )
+    except (PermissionError, OSError):
+        dirs = []
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "dirs": dirs}
+
+
+class RelocateReq(BaseModel):
+    dest_dir: str
+
+
+@app.post("/api/tracks/{track_id}/relocate")
+def api_relocate_track(track_id: str, req: RelocateReq) -> dict[str, Any]:
+    """Move one track's file to an arbitrary folder. If the destination is inside
+    the library it stays indexed (row kept); if it's outside, the track is dropped
+    from index.csv (it's no longer part of this library)."""
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured")
+    lib = Path(s["library_dir"]).resolve()
+    dest = Path(req.dest_dir)
+    if not dest.exists() or not dest.is_dir():
+        raise HTTPException(400, f"destination folder does not exist: {req.dest_dir}")
+    dest = dest.resolve()
+    rows = _read_library()
+    row = _find_row(rows, track_id)
+    if row is None:
+        raise HTTPException(404, f"track {track_id} not found in CSV")
+    by_name, all_paths = _disk_index(lib)
+    cur = _find_disk_file(row, by_name, all_paths)
+    if cur is None:
+        raise HTTPException(404, "track file not found on disk")
+    if cur.parent.resolve() == dest:
+        return {"moved": False, "inside": True, "dest": str(dest)}
+    target = dest / cur.name
+    final = target
+    n = 2
+    while final.exists() and final.resolve() != cur.resolve():
+        final = dest / f"{target.stem} ({n}){target.suffix}"
+        n += 1
+    try:
+        safe_replace(cur, final)
+    except Exception as e:
+        raise HTTPException(500, f"move failed: {e}")
+    # Inside the library → keep the row (update basename if de-colliding renamed it).
+    try:
+        final.resolve().relative_to(lib)
+        inside = True
+    except ValueError:
+        inside = False
+    if inside:
+        if final.name != cur.name:
+            row["file"] = final.name
+    else:
+        rows = [r for r in rows if r.get("spotify_id") != track_id]
+    _write_library(rows)
+    # Clean up any bucket folder we may have emptied by moving out of it.
+    if _BUCKET_NAME_RE.match(cur.parent.name) and cur.parent.resolve() != lib:
+        try:
+            cur.parent.rmdir()
+        except OSError:
+            pass
+    return {"moved": True, "inside": inside, "dest": str(dest), "file": final.name}
+
+
 # ── Tracks ────────────────────────────────────────────────────────────
 class TrackPatch(BaseModel):
     bpm: int | None = None

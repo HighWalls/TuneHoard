@@ -431,6 +431,10 @@ table.lib tbody tr{ cursor:pointer; }
 }
 .ctx-menu .ctx-item:hover{ background:var(--ink); color:var(--paper); }
 .ctx-menu .ctx-sep{ border-top:1px solid var(--ink); }
+/* Folder-browser rows (the in-app Move popup) */
+.fp-row{ padding:3px 8px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fp-row:hover{ background:var(--ink); color:var(--paper); }
+.fp-list{ border:1px solid var(--ink); }
 
 .edit-form{
   display:flex; gap:14px; flex-wrap:wrap; align-items:center;
@@ -858,7 +862,7 @@ hr.tilde::before{
       <div class="btn-row">
         <button class="btn" id="bulk-reanalyze">[ Analyze ]</button>
         <button class="btn" id="bulk-delete">[ Delete ]</button>
-        <button class="btn" id="bulk-move">[ Move to bucket ]</button>
+        <button class="btn" id="bulk-move">[ Move ]</button>
       </div>
     </div>
   </div>
@@ -2869,57 +2873,78 @@ $('#bulk-delete').addEventListener('click', async ()=>{
 });
 
 // Inline bucket picker — same vintage NFO styling as the right-click ctx-menu.
-let bucketPicker = null;
-function closeBucketPicker(){
-  if(bucketPicker){
-    bucketPicker.remove();
-    bucketPicker = null;
-    document.removeEventListener('mousedown', onPickerOutside, true);
-  }
-}
-function onPickerOutside(e){
-  if(bucketPicker && !bucketPicker.contains(e.target) && !e.target.closest('#bulk-move')){
-    closeBucketPicker();
-  }
-}
+// In-app folder browser for the bulk "Move" — navigate the filesystem (styled
+// like the rest of the app, not the native OS dialog), pick a destination, and
+// relocate the selected tracks there. Buckets are just subfolders; browse up (..)
+// to move outside the library entirely. Resolves to the chosen path, or null.
+function showFolderPicker(startPath, count){
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const box = document.createElement('div');
+    box.className = 'welcome';
+    box.style.maxWidth = '640px';
+    box.style.textAlign = 'left';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    let cur = startPath || '';
 
-$('#bulk-move').addEventListener('click', e=>{
-  if(selected.size === 0) return;
-  // Click again on the trigger while open → dismiss.
-  if(bucketPicker){ closeBucketPicker(); return; }
+    function done(val){
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(val);
+    }
+    function onKey(ev){ if(ev.key === 'Escape'){ ev.stopPropagation(); done(null); } }
+    document.addEventListener('keydown', onKey, true);
+    overlay.addEventListener('mousedown', ev => { if(ev.target === overlay) done(null); });
 
-  bucketPicker = document.createElement('div');
-  bucketPicker.className = 'ctx-menu';
-  bucketPicker.innerHTML =
-    `<div class="ctx-item ctx-sep" style="cursor:default;background:var(--ink);color:var(--paper);">move ${selected.size} track${selected.size===1?'':'s'} to:</div>` +
-    BUCKETS.map(b => `<div class="ctx-item" data-bucket="${b.name}">${b.name}/</div>`).join('');
-  document.body.appendChild(bucketPicker);
+    async function render(){
+      let data;
+      try { data = await window.API.browseDirs(cur); }
+      catch(err){
+        box.innerHTML = `<h2>Move</h2><div class="rule">~~~~~~~~~~~~~~~~~~~~~~~~~</div>`
+          + `<div style="margin-bottom:12px;">couldn't list folders: ${escapeHtml(err.message || String(err))}</div>`
+          + `<div style="text-align:center;"><button class="btn" data-act="cancel">[ Close ]</button></div>`;
+        return;
+      }
+      cur = data.path;
+      const rows = [];
+      if(data.parent) rows.push(`<div class="fp-row" data-path="${escapeHtml(data.parent)}">📁 ..</div>`);
+      for(const d of (data.dirs || [])){
+        rows.push(`<div class="fp-row" data-path="${escapeHtml(d.path)}">📁 ${escapeHtml(d.name)}/</div>`);
+      }
+      const list = rows.length ? rows.join('') : `<div class="muted" style="padding:6px 2px;">(no subfolders here)</div>`;
+      box.innerHTML =
+        `<h2>Move ${count} track${count===1?'':'s'}</h2>`
+        + `<div class="rule">~~~~~~~~~~~~~~~~~~~~~~~~~</div>`
+        + `<div class="muted" style="margin-bottom:4px;">Open a folder, then [ Move here ]. Buckets are folders; go up (..) to move outside the library.</div>`
+        + `<div style="word-break:break-all; margin-bottom:8px; padding:4px 6px; border:1px solid var(--ink);">${escapeHtml(cur)}</div>`
+        + `<div class="fp-list" style="max-height:280px; overflow:auto; margin-bottom:14px;">${list}</div>`
+        + `<div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">`
+        +   `<button class="btn" data-act="cancel">[ Cancel ]</button>`
+        +   `<button class="btn" data-act="move">[ Move here ]</button>`
+        + `</div>`;
+    }
 
-  // Position above the button (or below if there isn't room above).
-  const btnRect = $('#bulk-move').getBoundingClientRect();
-  const pw = bucketPicker.offsetWidth, ph = bucketPicker.offsetHeight;
-  let x = btnRect.left;
-  let y = btnRect.top - ph - 4;
-  if(y < 4) y = btnRect.bottom + 4;
-  if(x + pw > window.innerWidth - 4) x = window.innerWidth - pw - 4;
-  if(x < 4) x = 4;
-  bucketPicker.style.left = x + 'px';
-  bucketPicker.style.top = y + 'px';
-
-  bucketPicker.addEventListener('click', ev=>{
-    const it = ev.target.closest('.ctx-item[data-bucket]');
-    if(!it) return;
-    const target = it.dataset.bucket;
-    closeBucketPicker();
-    runBulk(`move → ${target}/`, id => window.API.moveTrack(id, target, null));
+    box.addEventListener('click', ev => {
+      const nav = ev.target.closest('.fp-row[data-path]');
+      if(nav){ cur = nav.dataset.path; render(); return; }
+      const act = ev.target.closest('[data-act]');
+      if(!act) return;
+      done(act.dataset.act === 'move' ? cur : null);
+    });
+    render();
   });
+}
 
-  // Defer outside-click attach so this same click doesn't immediately close it.
-  setTimeout(()=> document.addEventListener('mousedown', onPickerOutside, true), 0);
+$('#bulk-move').addEventListener('click', async ()=>{
+  if(selected.size === 0) return;
+  const el = $('#lib-folder-path');
+  const start = (el && el.title) || '';
+  const dest = await showFolderPicker(start, selected.size);
+  if(!dest) return;  // cancelled
+  runBulk('move', id => window.API.relocateTrack(id, dest));
 });
-
-window.addEventListener('keydown', e=>{ if(e.key === 'Escape') closeBucketPicker(); });
-window.addEventListener('blur', closeBucketPicker);
 
 // download button — submit a real job to the backend
 $('#dl-btn').addEventListener('click', async ()=>{
@@ -3064,6 +3089,15 @@ $('#w-continue').addEventListener('click', async ()=>{
       return jfetch(`/api/tracks/${encodeURIComponent(id)}/move`, {
         method: 'POST',
         body: JSON.stringify({to_bucket: toBucket, new_bpm: newBPM}),
+      });
+    },
+    async browseDirs(path){
+      return jfetch('/api/browse-dirs?path=' + encodeURIComponent(path || ''));
+    },
+    async relocateTrack(id, destDir){
+      return jfetch(`/api/tracks/${encodeURIComponent(id)}/relocate`, {
+        method: 'POST',
+        body: JSON.stringify({dest_dir: destDir}),
       });
     },
     async reanalyzeTrack(id){
