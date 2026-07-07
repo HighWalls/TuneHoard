@@ -247,6 +247,31 @@ def _disk_index(out_dir: Path) -> tuple[dict[str, Path], list[Path]]:
     return {p.name: p for p in paths}, paths
 
 
+# A BPM-bucket subfolder name: "115-125" / "126-135" / … or "unknown-bpm".
+_BUCKET_NAME_RE = re.compile(r"^(?:\d{1,3}-\d{1,3}|unknown-bpm)$")
+
+
+def _library_layout(out_dir: Path) -> tuple[bool, bool]:
+    """Inspect the on-disk layout. Returns (has_root_files, has_bucketed_files):
+    whether any audio file sits directly in out_dir, and whether any sits inside
+    a BPM-bucket subfolder. Used to decide whether the library matches the
+    Library Layout setting (and thus whether to offer a reorganize)."""
+    has_root = False
+    has_bucketed = False
+    for p in audio_files(out_dir):
+        try:
+            rel = p.relative_to(out_dir)
+        except ValueError:
+            continue
+        if len(rel.parts) == 1:
+            has_root = True
+        elif _BUCKET_NAME_RE.match(rel.parts[0]):
+            has_bucketed = True
+        if has_root and has_bucketed:
+            break
+    return has_root, has_bucketed
+
+
 def _apply_row_to_disk(
     row: dict[str, Any],
     out_dir: Path,
@@ -1358,6 +1383,79 @@ def api_cancel_scan(scan_id: str) -> dict[str, Any]:
         snap = _scan_snapshot(SCANS[scan_id])
     _broadcast_scans()
     return snap
+
+
+# ── Library layout (bucketed vs flat) + reorganize ────────────────────
+@app.get("/api/library/layout")
+def api_library_layout() -> dict[str, Any]:
+    """Report the on-disk layout so the dashboard can tell whether it matches the
+    Library Layout setting (and offer to reorganize). `has_root`: files sit in the
+    top folder; `bucketed`: files sit in BPM-range subfolders."""
+    s = load_settings()
+    if not s["library_dir"]:
+        return {"has_root": False, "bucketed": False, "track_count": 0}
+    out_dir = Path(s["library_dir"])
+    if not out_dir.exists():
+        return {"has_root": False, "bucketed": False, "track_count": 0}
+    has_root, bucketed = _library_layout(out_dir)
+    return {"has_root": has_root, "bucketed": bucketed, "track_count": len(audio_files(out_dir))}
+
+
+class ReorgReq(BaseModel):
+    mode: str  # "bucket" | "flat"
+
+
+@app.post("/api/library/reorganize")
+def api_reorganize(req: ReorgReq) -> dict[str, Any]:
+    """Physically reorganize existing files: mode='bucket' moves each track into
+    its BPM-range subfolder; mode='flat' moves everything back to the top folder.
+    Filenames (index.csv keys on basename) are unchanged unless a de-collide is
+    needed. Empty bucket subfolders are cleaned up afterward."""
+    if req.mode not in ("bucket", "flat"):
+        raise HTTPException(400, "mode must be 'bucket' or 'flat'")
+    s = load_settings()
+    if not s["library_dir"]:
+        raise HTTPException(400, "library_dir not configured")
+    out_dir = Path(s["library_dir"])
+    rows = _read_library()
+    by_name, all_paths = _disk_index(out_dir)
+    moved = 0
+    for row in rows:
+        cur = _find_disk_file(row, by_name, all_paths)
+        if cur is None:
+            continue
+        target_dir = (out_dir / bpm_bucket(row.get("bpm"))) if req.mode == "bucket" else out_dir
+        target = target_dir / cur.name
+        if cur.resolve() == target.resolve():
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        # De-collide against a DIFFERENT file already at the destination.
+        final = target
+        n = 2
+        while final.exists() and final.resolve() != cur.resolve():
+            final = target_dir / f"{target.stem} ({n}){target.suffix}"
+            n += 1
+        try:
+            safe_replace(cur, final)
+            by_name.pop(cur.name, None)
+            by_name[final.name] = final
+            if final.name != cur.name:
+                row["file"] = final.name
+            moved += 1
+        except Exception as e:
+            print(f"  ! reorganize move failed ({e}): {cur.name}")
+    # Remove now-empty BPM-bucket subfolders (never touch other folders).
+    try:
+        for sub in sorted(out_dir.iterdir(), key=lambda p: len(p.parts), reverse=True):
+            if sub.is_dir() and _BUCKET_NAME_RE.match(sub.name):
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+    except FileNotFoundError:
+        pass
+    _write_library(rows)
+    return {"moved": moved, "mode": req.mode}
 
 
 # ── Tracks ────────────────────────────────────────────────────────────

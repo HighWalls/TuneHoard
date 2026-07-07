@@ -889,10 +889,10 @@ hr.tilde::before{
 
   <div class="fset">
     <div class="inset-label">~~ LIBRARY LAYOUT ~~</div>
-    <div style="margin-bottom:10px;">Where new tracks land on disk after a download. Both options analyze BPM + key and write the tags either way; this only changes the folder layout. Toggle at any time — the next bucket-sync pass (re-run any download with this setting changed) will reorganize existing files in place.</div>
+    <div style="margin-bottom:10px;">Where new tracks land on disk after a download. To apply this to your existing library, run <span class="muted">[ scan / analyze ]</span> in the Library — it asks first before reorganizing.</div>
     <div class="row" id="layout-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:4px;">
       <span class="radio layout" data-val="bucket">( ) Bucket by BPM &mdash; tracks land in <span class="muted">115-125, 126-135, ...</span> subfolders</span>
-      <span class="radio layout on" data-val="flat">(•) Flat &mdash; everything in one folder, BPM is still tagged</span>
+      <span class="radio layout on" data-val="flat">(•) Flat &mdash; everything in one folder</span>
     </div>
   </div>
 
@@ -2741,6 +2741,36 @@ $('#src-list').addEventListener('click', e=>{
 // which is how you run "analyze missing" AFTER a read-tags-only scan.
 async function runScanFolder(btn){
   if(!window.API){ toast('API not ready'); return; }
+
+  // Reorganize prompt — only when the library is already populated (NOT the very
+  // first scan) and the on-disk layout doesn't match the Library Layout setting.
+  // Answered BEFORE the scan-mode dialog; the move itself runs after the scan.
+  let reorgMode = null;
+  try {
+    if(LIB.length > 0){
+      const layout = await window.API.getLayout();
+      if(bucketByBpm && layout.has_root){
+        const yes = await showModal({
+          title: 'Reorganize into BPM folders?',
+          body: "You have 'Bucket by BPM' selected in Settings, but not every track\n" +
+                "is in a BPM folder yet.\n\n" +
+                "Reorganize the existing library into 115-125 / 126-135 / … subfolders?",
+          cancel: 'No', ok: 'Yes',
+        });
+        if(yes === true) reorgMode = 'bucket';
+      } else if(!bucketByBpm && layout.bucketed){
+        const yes = await showModal({
+          title: 'Flatten library?',
+          body: "You have 'Flat' selected in Settings, but the library is split into\n" +
+                "BPM folders.\n\n" +
+                "Move all tracks back into one folder (undo the buckets)?",
+          cancel: 'No', ok: 'Yes',
+        });
+        if(yes === true) reorgMode = 'flat';
+      }
+    }
+  } catch(e){ /* layout check is best-effort — fall through to the scan */ }
+
   const choice = await showModal({
     title: 'Scan folder',
     body:
@@ -2776,6 +2806,16 @@ async function runScanFolder(btn){
     else if (r.filled > 0)  msg = `scan filled BPM/key on ${r.filled} previously-blank tracks · ${r.total} total`;
     else                    msg = `scan: nothing new (${r.total} tracks already indexed)`;
     toast(msg);
+    // Reorganize AFTER scanning so bucketing uses freshly-analyzed BPM values.
+    if(reorgMode){
+      if(btn) btn.textContent = '[ Reorganizing... ]';
+      try {
+        const rr = await window.API.reorganize({mode: reorgMode});
+        toast(reorgMode === 'bucket'
+          ? `reorganized ${rr.moved} file(s) into BPM folders`
+          : `flattened ${rr.moved} file(s) into one folder`);
+      } catch(err){ toast('reorganize failed: ' + (err.message || err)); }
+    }
     if(window.API.refreshLibrary) await window.API.refreshLibrary();
   } catch(err){
     toast('scan failed: ' + err.message);
@@ -2989,6 +3029,10 @@ $('#w-continue').addEventListener('click', async ()=>{
       if(opts && opts.analyze_missing) params.set('analyze_missing', 'true');
       const qs = params.toString();
       return jfetch('/api/library/scan' + (qs ? '?'+qs : ''), {method: 'POST'});
+    },
+    async getLayout(){ return jfetch('/api/library/layout'); },
+    async reorganize(opts){
+      return jfetch('/api/library/reorganize', {method: 'POST', body: JSON.stringify(opts || {})});
     },
     async refreshLibrary(){
       try{
