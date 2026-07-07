@@ -2752,8 +2752,7 @@ async function runScanFolder(btn){
       if(bucketByBpm && layout.has_root){
         const yes = await showModal({
           title: 'Reorganize into BPM folders?',
-          body: "You have 'Bucket by BPM' selected in Settings, but not every track\n" +
-                "is in a BPM folder yet.\n\n" +
+          body: "You have 'Bucket by BPM' selected in Settings, but not every track is in a BPM folder yet.\n\n" +
                 "Reorganize the existing library into 115-125 / 126-135 / … subfolders?",
           cancel: 'No', ok: 'Yes',
         });
@@ -2761,8 +2760,7 @@ async function runScanFolder(btn){
       } else if(!bucketByBpm && layout.bucketed){
         const yes = await showModal({
           title: 'Flatten library?',
-          body: "You have 'Flat' selected in Settings, but the library is split into\n" +
-                "BPM folders.\n\n" +
+          body: "You have 'Flat' selected in Settings, but the library is split into BPM folders.\n\n" +
                 "Move all tracks back into one folder (undo the buckets)?",
           cancel: 'No', ok: 'Yes',
         });
