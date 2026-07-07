@@ -596,7 +596,8 @@ table.lib tbody tr{ cursor:pointer; }
   box-shadow:0 -2px 0 0 var(--ink);
 }
 .now-playing.hidden{ display:none !important; }
-.now-playing .np-glyph{ font-weight:700; }
+.now-playing .np-glyph{ font-weight:700; cursor:pointer; user-select:none; min-width:1.4em; text-align:center; }
+.now-playing .np-glyph:hover{ background:var(--ink); color:var(--paper); }
 .now-playing .np-title{
   flex:0 1 auto;
   min-width:120px;
@@ -999,7 +1000,7 @@ hr.tilde::before{
 <!-- Pinned at bottom of viewport while playback is active. Non-blocking
      (z-index below modals). Click title → scrolls the row into view. -->
 <div id="now-playing" class="now-playing hidden">
-  <span class="np-glyph">&#9654;</span>
+  <span class="np-glyph" id="np-toggle" role="button" tabindex="0" title="play / pause (Space)">&#9654;</span>
   <span class="np-title" id="np-title" title="scroll to playing track">artist — title</span>
   <div class="np-scrub" id="np-scrub" title="seek"><div class="np-scrub-fill" id="np-scrub-fill"></div></div>
   <span class="np-time" id="np-time">0:00 / 0:00</span>
@@ -1631,10 +1632,11 @@ function fmtTime(s){
 function togglePlay(id){
   const audio = document.getElementById('audio-player');
   if(!audio) return;
-  if(currentlyPlayingId === id && !audio.paused){
-    audio.pause();
-    currentlyPlayingId = null;
-    renderLib();
+  if(currentlyPlayingId === id){
+    // Same track: pause/resume in place without unloading it, so the
+    // now-playing bar stays and playback can be resumed from where it stopped.
+    if(audio.paused) audio.play().catch(()=>{});
+    else audio.pause();
     updateNowPlaying();
     return;
   }
@@ -1659,14 +1661,28 @@ function updateNowPlaying(){
   const bar = document.getElementById('now-playing');
   const audio = document.getElementById('audio-player');
   if(!bar || !audio) return;
-  const playing = currentlyPlayingId !== null && !audio.paused;
-  if(!playing){
+  // Bar is shown whenever a track is LOADED (playing OR paused). It only hides
+  // on a real stop/end, which sets currentlyPlayingId = null.
+  if(currentlyPlayingId === null){
     bar.classList.add('hidden');
     document.body.classList.remove('has-now-playing');
     return;
   }
   bar.classList.remove('hidden');
   document.body.classList.add('has-now-playing');
+  const paused = audio.paused;
+  // Toggle glyph reflects state: ❚❚ while playing, ▶ while paused (click to resume).
+  const glyph = document.getElementById('np-toggle');
+  if(glyph){
+    glyph.textContent = paused ? '▶' : '❚❚';
+    glyph.title = paused ? 'resume (Space)' : 'pause (Space)';
+  }
+  // Keep the playing row's inline glyph in sync (no full re-render).
+  const rowGlyph = document.querySelector(`.track-row[data-id="${currentlyPlayingId}"] .track-play`);
+  if(rowGlyph){
+    rowGlyph.textContent = paused ? '▶' : '❚❚';
+    rowGlyph.classList.toggle('playing', !paused);
+  }
   const t = (typeof LIB !== 'undefined') ? LIB.find(x => x.id === currentlyPlayingId) : null;
   const titleEl = document.getElementById('np-title');
   if(titleEl){
@@ -1722,6 +1738,20 @@ function updateScrubFill(){
   audio.addEventListener('loadedmetadata', updateScrubFill);
 
   // Wire the now-playing bar controls.
+  // Play/pause toggle glyph: pause the current track, click again to resume.
+  const toggleBtn = document.getElementById('np-toggle');
+  if(toggleBtn){
+    const doToggle = () => {
+      if(currentlyPlayingId === null) return;
+      if(audio.paused) audio.play().catch(()=>{});
+      else audio.pause();
+      // the audio 'play'/'pause' events call updateNowPlaying() to refresh glyphs
+    };
+    toggleBtn.addEventListener('click', doToggle);
+    toggleBtn.addEventListener('keydown', e => {
+      if(e.key === 'Enter'){ e.preventDefault(); doToggle(); }
+    });
+  }
   const stopBtn = document.getElementById('np-stop');
   if(stopBtn){
     stopBtn.addEventListener('click', () => {
@@ -1862,14 +1892,16 @@ function trackRowHtml(t){
   const sel = selected.has(t.id) ? ' sel' : '';
   const mv = t.moved ? ' moved' : '';
   const flag = t.moved ? '!!' : '  ';
-  const playing = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
-  const playGlyph = playing ? '❚❚' : '▶';
-  const scrubMarkup = playing
+  const audioEl = document.getElementById('audio-player');
+  const isCurrent = (typeof currentlyPlayingId !== 'undefined' && currentlyPlayingId === t.id);
+  const isActive = isCurrent && audioEl && !audioEl.paused;  // loaded AND playing (not paused)
+  const playGlyph = isActive ? '❚❚' : '▶';
+  const scrubMarkup = isCurrent
     ? `<span class="track-scrub"><span class="track-scrub-fill"></span></span>`
     : '';
   let h = `<div class="track-row${sel}${mv}" data-id="${t.id}">`
         + `<span class="track-moved-flag">${flag}</span>`
-        + `<span class="track-play${playing?' playing':''}" data-play="${t.id}" title="${playing?'pause':'play preview'}">${playGlyph}</span>`
+        + `<span class="track-play${isActive?' playing':''}" data-play="${t.id}" title="${isCurrent ? (isActive?'pause':'resume') : 'play preview'}">${playGlyph}</span>`
         + scrubMarkup
         + `<span class="track-cam">${padR(t.cam+' ('+t.key+')',10)}</span>`
         + `<span class="track-sep">·</span>`
