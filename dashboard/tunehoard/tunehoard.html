@@ -894,7 +894,7 @@ hr.tilde::before{
 
   <div class="fset">
     <div class="inset-label">~~ LIBRARY LAYOUT ~~</div>
-    <div style="margin-bottom:10px;">Where new tracks land on disk after a download. To apply this to your existing library, run <span class="muted">[ scan / analyze ]</span> in the Library — it asks first before reorganizing.</div>
+    <div style="margin-bottom:10px;">How new tracks land on disk after a download. To apply this to your existing library, run <span class="muted">[ scan / analyze ]</span> in the Library — it asks first before reorganizing.</div>
     <div class="row" id="layout-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:4px;">
       <span class="radio layout" data-val="bucket">( ) Bucket by BPM &mdash; tracks land in <span class="muted">115-125, 126-135, ...</span> subfolders</span>
       <span class="radio layout on" data-val="flat">(•) Flat &mdash; everything in one folder</span>
@@ -903,8 +903,7 @@ hr.tilde::before{
 
   <div class="fset">
     <div class="inset-label">~~ DOWNLOAD BEHAVIOR ~~</div>
-    <div style="margin-bottom:10px;">Defaults applied to every job submitted from this dashboard. <span class="muted">Skip BPM/key analysis</span> is useful when you just want to grab the audio fast — the file lands untagged, and you can run analysis later via <span class="muted">[ Analyze ]</span> per row or right-click on a bucket.</div>
-    <div class="row" id="dl-behavior-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:6px;">
+    <div class="row" id="dl-behavior-row" style="user-select:none; flex-direction:column; align-items:flex-start; gap:6px; margin-top:10px;">
       <span class="checkbox on" data-dl-key="skip_existing">[x] Skip tracks already in the library</span>
       <span class="checkbox" data-dl-key="skip_analyze">[ ] Skip BPM/key analysis (download only)</span>
     </div>
@@ -1055,8 +1054,23 @@ const PALETTES = [
   { ink: '#E0E0E0', paper: '#1A1A2E', name: 'Midnight' },
   { ink: '#FFFFFF', paper: '#5C0000', name: 'Burgundy' },
   { ink: '#000000', paper: '#C0FFC0', name: 'Mint Print' },
+  { ink: '#FF71CE', paper: '#1A0033', name: 'Vaporwave' },
+  { ink: '#0F380F', paper: '#9BBC0F', name: 'Game Boy' },
+  { ink: '#D8DEE9', paper: '#2E3440', name: 'Nord' },
+  { ink: '#F8F8F2', paper: '#282A36', name: 'Dracula' },
+  { ink: '#EBDBB2', paper: '#282828', name: 'Gruvbox' },
+  { ink: '#FF4136', paper: '#0A0A0A', name: 'Hacker Red' },
+  { ink: '#7FDBFF', paper: '#001F3F', name: 'Ocean' },
+  { ink: '#3B2F1E', paper: '#EFE6D5', name: 'Sepia' },
+  { ink: '#E0B0FF', paper: '#1A0A2E', name: 'Purple Haze' },
+  { ink: '#5FFFD7', paper: '#06201C', name: 'Teal Term' },
+  { ink: '#2A1A3A', paper: '#E6DFF0', name: 'Lavender' },
+  { ink: '#BBD5FF', paper: '#0A2A4A', name: 'Blueprint' },
+  { ink: '#B8E994', paper: '#0B2818', name: 'Forest' },
+  { ink: '#1A1A1A', paper: '#E8E2D4', name: 'Newsprint' },
 ];
 const PRESETS = ['Paper','CRT Green','DOS Blue'];
+let recentRandom = [];  // recent Randomize picks (ink|paper), to avoid short-run repeats
 let currentPalette = (function(){
   try{
     const saved = JSON.parse(localStorage.getItem('pploader.theme') || 'null');
@@ -1098,8 +1112,15 @@ function setupThemeBar(){
     const key = btn.dataset.theme;
     let chosen;
     if(key === '__random'){
-      const pool = PALETTES.filter(p=> !(p.ink===currentPalette.ink && p.paper===currentPalette.paper));
+      // Avoid not just the current palette but the last few, so Randomize never
+      // repeats itself in a short run. Falls back gracefully if too many excluded.
+      const keyOf = p => p.ink + '|' + p.paper;
+      const avoid = new Set([keyOf(currentPalette), ...recentRandom]);
+      let pool = PALETTES.filter(p => !avoid.has(keyOf(p)));
+      if(pool.length === 0) pool = PALETTES.filter(p => keyOf(p) !== keyOf(currentPalette));
       chosen = pool[Math.floor(Math.random()*pool.length)];
+      recentRandom.push(keyOf(chosen));
+      while(recentRandom.length > 5) recentRandom.shift();  // remember the last 5
     } else {
       chosen = PALETTES.find(p=>p.name===key);
     }
