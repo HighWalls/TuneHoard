@@ -1898,6 +1898,7 @@ function trackRowHtml(t){
        +   `<button class="btn" data-act="save">[ Save ]</button>`
        +   `<button class="btn" data-act="reanalyze">[ Analyze ]</button>`
        +   `<button class="btn" data-act="open">[ Open in folder ]</button>`
+       +   `<button class="btn" data-act="move">[ Move ]</button>`
        +   `<button class="btn" data-act="delete">[ Delete ]</button>`
        + `</div>`
        + `</div>`;
@@ -2065,6 +2066,21 @@ tree.addEventListener('click', e=>{
       if(window.API){
         window.API.openTrackFolder(id)
           .catch(err => toast('open folder failed: ' + err.message));
+      }
+    } else if(act==='move'){
+      if(window.API){
+        const fp = $('#lib-folder-path');
+        const start = (fp && fp.title) || '';
+        showFolderPicker(start, 1).then(dest => {
+          if(!dest) return;  // cancelled
+          window.API.relocateTrack(id, dest)
+            .then(() => {
+              expandedTrack.delete(id);
+              toast('moved "' + (t ? t.title : id) + '"');
+              if(window.API.refreshLibrary) window.API.refreshLibrary();
+            })
+            .catch(err => toast('move failed: ' + err.message));
+        });
       }
     }
     return;
