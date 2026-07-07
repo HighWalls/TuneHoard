@@ -824,13 +824,6 @@ hr.tilde::before{
     <div class="box-body" style="padding:14px 16px 6px;">
       <div class="filterbar">
         <input type="text" id="f-search" placeholder="search artist or title...">
-        <span class="radio-line" id="f-source">
-          <span class="radio on" data-val="all">(•) All</span>
-          <span class="radio" data-val="SP">( ) Spotify</span>
-          <span class="radio" data-val="YT">( ) YouTube</span>
-          <span class="radio" data-val="SC">( ) SoundCloud</span>
-          <span class="radio" data-val="scanned">( ) Scanned</span>
-        </span>
         <span>BPM:&nbsp;<input id="f-bpm-min" type="number" class="bpm" placeholder="___">&nbsp;-&nbsp;<input id="f-bpm-max" type="number" class="bpm" placeholder="___"></span>
         <span class="cam-wrap">Camelot/Key:&nbsp;<span id="cam-chips" class="cam-wrap" style="gap:4px;"></span><input id="f-cam" type="text" class="cam" placeholder="8A/Am" maxlength="4"></span>
         <a class="tlink" id="f-reset">[Reset filters]</a>
@@ -1257,20 +1250,6 @@ $$('.checkbox').forEach(c=>{
 });
 
 // ---------- radios ----------
-$$('.radio-line').forEach(line=>{
-  line.addEventListener('click', e=>{
-    const r = e.target.closest('.radio'); if(!r) return;
-    $$('.radio', line).forEach(x=>{
-      x.classList.remove('on');
-      x.textContent = x.textContent.replace(/^\([^)]*\)/, '( )');
-    });
-    r.classList.add('on');
-    r.textContent = r.textContent.replace(/^\([^)]*\)/, '(•)');
-    sourceFilter = r.dataset.val;
-    renderLib();
-  });
-});
-
 // ---------- jobs (mock) ----------
 const JOBS = [
   {
@@ -1592,7 +1571,6 @@ const LIB = [
 // Re-bucket the synthetic ones whose bpm crossed boundaries above
 LIB.forEach(t=> t.bucket = bucketFor(t.bpm));
 
-let sourceFilter = 'all';
 let selected = new Set();      // track ids
 let expandedTrack = new Set(); // track ids → edit form open
 let expandedBucket = new Set();// bucket names
@@ -1857,15 +1835,6 @@ function passesFilters(t){
   const bMax = parseInt($('#f-bpm-max').value,10);
   const camLive = normalizeKeyInput($('#f-cam').value);
   if(q && !((t.artist+' '+t.title).toLowerCase().includes(q))) return false;
-  if(sourceFilter!=='all'){
-    // 'scanned' matches tracks with no recognized source (backend maps unknown
-    // sources — including the 'scanned' sentinel — to an empty string).
-    if(sourceFilter==='scanned'){
-      if(t.source !== '') return false;
-    } else if(t.source !== sourceFilter){
-      return false;
-    }
-  }
   if(!isNaN(bMin) && t.bpm < bMin) return false;
   if(!isNaN(bMax) && t.bpm > bMax) return false;
   // Camelot: chips OR-match. live input also counts (so users can type a single value without pressing Enter).
@@ -1879,8 +1848,7 @@ function filtersActive(){
           !isNaN(parseInt($('#f-bpm-min').value,10)) ||
           !isNaN(parseInt($('#f-bpm-max').value,10)) ||
           $('#f-cam').value.trim() ||
-          camChips.length ||
-          sourceFilter!=='all');
+          camChips.length);
 }
 
 function padR(s,n){ s = String(s); return s.length>=n ? s.slice(0,n) : s + ' '.repeat(n-s.length); }
@@ -2461,12 +2429,6 @@ $('#f-reset').addEventListener('click', ()=>{
   $('#f-cam').value = '';
   camChips.length = 0;
   renderCamChips();
-  // reset radio
-  $$('.radio', $('#f-source')).forEach((x,k)=>{
-    x.classList.toggle('on', k===0);
-    x.textContent = x.textContent.replace(/^\([^)]*\)/, k===0?'(•)':'( )');
-  });
-  sourceFilter = 'all';
   renderLib();
 });
 
