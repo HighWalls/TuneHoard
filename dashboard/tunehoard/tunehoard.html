@@ -820,6 +820,10 @@ hr.tilde::before{
   <div class="box">
     <div class="box-title">
       <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
+      <span class="lib-folder-ctl" style="display:flex; align-items:center; gap:8px; min-width:0;">
+        <span class="muted" id="lib-folder-path" title="" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch;"></span>
+        <a class="tlink" id="lib-change-folder" title="pick a different library folder to view / download into">[ change folder ]</a>
+      </span>
     </div>
     <div class="box-body" style="padding:14px 16px 6px;">
       <div class="filterbar">
@@ -2476,6 +2480,32 @@ $('#s-ffmpeg-browse')?.addEventListener('click', ()=>
 $('#w-out-browse')?.addEventListener('click', ()=>
   browseInto($('#w-out'), 'directory', 'Choose output folder'));
 
+// Library section: show the active folder + let the user switch it inline
+// (same folder downloads land in), without a trip to Settings.
+function setLibFolderDisplay(path){
+  const el = $('#lib-folder-path');
+  if(!el) return;
+  const p = (path || '').trim();
+  if(!p){ el.textContent = '(no folder set)'; el.title = 'No library folder configured'; return; }
+  const name = p.replace(/[\\/]+$/,'').split(/[\\/]/).pop() || p;
+  el.textContent = '📁 ' + name;   // 📁 <folder name>
+  el.title = p;                               // full path on hover
+}
+$('#lib-change-folder')?.addEventListener('click', async ()=>{
+  if(!window.API){ toast('API not ready'); return; }
+  try{
+    const cur = ($('#lib-folder-path')?.title) || ($('#s-out')?.value) || '';
+    const r = await window.API.browse({mode:'directory', title:'Choose library folder', initial: cur});
+    if(!r || !r.path) return;                 // user cancelled the picker
+    await window.API.patchSettings({library_dir: r.path});
+    setLibFolderDisplay(r.path);
+    if($('#s-out')) $('#s-out').value = r.path;   // keep the Settings field in sync
+    if(window.API.refreshLibrary) await window.API.refreshLibrary();
+    if(window.API.refreshFailures) window.API.refreshFailures();
+    toast('library folder → ' + r.path);
+  }catch(err){ toast('browse failed: ' + (err.message || err)); }
+});
+
 // settings: Spotify status pill + Authorize flow
 async function refreshSpotifyStatus(){
   const pill = $('#s-status');
@@ -3339,6 +3369,7 @@ $('#w-continue').addEventListener('click', async ()=>{
     try{
       const s = await API.getSettings();
       if(s.library_dir && $('#s-out')) $('#s-out').value = s.library_dir;
+      setLibFolderDisplay(s.library_dir || '');
       if(s.ffmpeg_path && $('#s-ffmpeg')) $('#s-ffmpeg').value = s.ffmpeg_path;
       if(s.spotify_client_id && $('#s-cid')) $('#s-cid').value = s.spotify_client_id;
       // don't pre-fill the masked secret
