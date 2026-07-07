@@ -95,6 +95,7 @@ _CHOSEN_PORT: int = 8765
 from analyzer import analyze
 from camelot import musical_key_short
 from main import (  # type: ignore[no-redef]
+    AUDIO_EXTS,
     CSV_FIELDS,
     _bpm_sort_key,
     _classify_key_format,
@@ -103,6 +104,7 @@ from main import (  # type: ignore[no-redef]
     _find_disk_file,
     _key_prefix,
     _row_bpm_int,
+    audio_files,
     bpm_bucket,
     safe_filename,
     safe_replace,
@@ -238,9 +240,10 @@ def _find_row(rows: list[dict[str, Any]], track_id: str) -> dict[str, Any] | Non
 
 
 def _disk_index(out_dir: Path) -> tuple[dict[str, Path], list[Path]]:
-    # Exclude _tmp/ — main.py stages partial yt-dlp downloads there; matching a
-    # row to an in-flight temp file would retag/delete/move the wrong thing.
-    paths = [p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts]
+    # All audio formats (not just mp3), excluding _tmp/ — main.py stages partial
+    # yt-dlp downloads there; matching a row to an in-flight temp file would
+    # retag/delete/move the wrong thing. (audio_files already skips _tmp.)
+    paths = audio_files(out_dir)
     return {p.name: p for p in paths}, paths
 
 
@@ -953,6 +956,62 @@ def _read_mp3_tags(mp3: Path) -> dict[str, str]:
     }
 
 
+def _read_audio_tags(path: Path) -> dict[str, str]:
+    """Format-agnostic tag read. MP3 uses the ID3 reader above; other formats
+    (FLAC/OGG/Opus via Vorbis, M4A/MP4 via atoms, WAV/AIFF via embedded ID3) are
+    read generically via mutagen. Same dict shape as _read_mp3_tags."""
+    ext = path.suffix.lower()
+    if ext == ".mp3":
+        return _read_mp3_tags(path)
+    blank = {"title": "", "artist": "", "album": "", "bpm": "",
+             "tkey": "", "camelot_txxx": "", "musical_txxx": ""}
+    try:
+        import mutagen
+        f = mutagen.File(path)
+    except Exception:
+        f = None
+    if f is None:
+        return blank
+    tags = getattr(f, "tags", None)
+    # WAV / AIFF carry ID3 — read those frames directly.
+    if ext in {".wav", ".aiff", ".aif"} and tags is not None:
+        def gt(fid: str) -> str:
+            try:
+                return str(tags[fid].text[0])
+            except Exception:
+                return ""
+        return {
+            "title": gt("TIT2"), "artist": gt("TPE1"), "album": gt("TALB"),
+            "bpm": gt("TBPM"), "tkey": gt("TKEY"),
+            "camelot_txxx": gt("TXXX:CAMELOT_KEY"), "musical_txxx": gt("TXXX:MUSICAL_KEY"),
+        }
+
+    # Vorbis (FLAC/OGG) keys are lowercase; MP4 uses atoms + freeform. Values may
+    # be lists, ints (tmpo), or bytes (freeform) — normalize to a plain string.
+    def first(*keys: str) -> str:
+        for k in keys:
+            try:
+                v = f.get(k)
+            except Exception:
+                v = None
+            if v:
+                item = v[0] if isinstance(v, (list, tuple)) else v
+                if isinstance(item, (bytes, bytearray)):
+                    return bytes(item).decode("utf-8", "ignore")
+                return str(item)
+        return ""
+
+    return {
+        "title": first("title", "\xa9nam"),
+        "artist": first("artist", "\xa9ART"),
+        "album": first("album", "\xa9alb"),
+        "bpm": first("bpm", "tmpo"),
+        "tkey": first("key", "initialkey", "----:com.apple.iTunes:KEY"),
+        "camelot_txxx": first("camelot_key", "----:com.apple.iTunes:CAMELOT_KEY"),
+        "musical_txxx": first("musical_key", "----:com.apple.iTunes:MUSICAL_KEY"),
+    }
+
+
 def _scan_one_mp3(
     mp3: Path,
     *,
@@ -960,9 +1019,9 @@ def _scan_one_mp3(
     analyze_missing: bool,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a fresh-row payload from one MP3, applying the chosen scan flags.
-    Caller merges this with any pre-existing CSV row (smart-fill semantics)."""
-    raw = _read_mp3_tags(mp3)
+    """Build a fresh-row payload from one audio file, applying the chosen scan
+    flags. Caller merges this with any pre-existing CSV row (smart-fill)."""
+    raw = _read_audio_tags(mp3)
     title = raw["title"] or mp3.stem
     artist = raw["artist"]
     album = raw["album"]
@@ -1084,7 +1143,7 @@ def _run_scan_thread(scan_id: str, read_bpm_key: bool, analyze_missing: bool) ->
         existing_by_file = {r.get("file"): r for r in existing_rows if r.get("file")}
         # Skip _tmp/: main.py stages partial downloads there as {id}.mp3; indexing
         # those as scan:{id} rows would pollute the library with incomplete files.
-        mp3s = sorted(p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts)
+        mp3s = sorted(audio_files(out_dir))  # all audio formats, _tmp excluded
         total = len(mp3s)
         _set(status="running", total=total, progress=0)
         _broadcast_scans()
@@ -1230,7 +1289,7 @@ def api_scan_library(
     kept = 0
     filled = 0  # existing rows whose blank fields were populated from tags
     # Skip _tmp/ (partial in-flight downloads).
-    mp3s = sorted(p for p in out_dir.rglob("*.mp3") if "_tmp" not in p.parts)
+    mp3s = sorted(audio_files(out_dir))  # all audio formats, _tmp excluded
     for mp3 in mp3s:
         existing = existing_by_file.get(mp3.name)
 
@@ -1937,7 +1996,17 @@ def api_get_audio(track_id: str, request: Request) -> Response:
     by_name, all_paths = _disk_index(out_dir)
     path = _find_disk_file(row, by_name, all_paths)
     if path is None or not path.exists():
-        raise HTTPException(404, "MP3 file not found on disk")
+        raise HTTPException(404, "track file not found on disk")
+
+    # Content-type by extension so the browser <audio> element decodes non-mp3
+    # formats correctly (flac/wav/m4a/ogg are widely supported).
+    mime = {
+        ".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav",
+        ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".alac": "audio/mp4",
+        ".aac": "audio/aac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
+        ".opus": "audio/ogg", ".aiff": "audio/aiff", ".aif": "audio/aiff",
+        ".wma": "audio/x-ms-wma",
+    }.get(path.suffix.lower(), "application/octet-stream")
 
     file_size = path.stat().st_size
     chunk_size = 64 * 1024
@@ -1962,7 +2031,7 @@ def api_get_audio(track_id: str, request: Request) -> Response:
             full_iter(),
             status_code=200,
             headers=headers,
-            media_type="audio/mpeg",
+            media_type=mime,
         )
 
     start, end = rng
@@ -1988,7 +2057,7 @@ def api_get_audio(track_id: str, request: Request) -> Response:
         range_iter(),
         status_code=206,
         headers=headers,
-        media_type="audio/mpeg",
+        media_type=mime,
     )
 
 

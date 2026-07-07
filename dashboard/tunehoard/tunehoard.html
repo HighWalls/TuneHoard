@@ -821,7 +821,8 @@ hr.tilde::before{
     <div class="box-title">
       <span class="label" id="lib-label">~~ LIBRARY (1,247 TRACKS) ~~</span>
       <span class="lib-folder-ctl" style="display:flex; align-items:center; gap:8px; min-width:0;">
-        <span class="muted" id="lib-folder-path" title="" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch;"></span>
+        <span class="muted" id="lib-folder-path" title="" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:26ch;"></span>
+        <a class="tlink" id="lib-scan-hdr" title="scan this folder for tracks / analyze missing BPM + key">[ scan / analyze ]</a>
         <a class="tlink" id="lib-change-folder" title="pick a different library folder to view / download into">[ change folder ]</a>
       </span>
     </div>
@@ -843,10 +844,10 @@ hr.tilde::before{
 |  -- or --             |
 |                       |
 |  scan the folder for  |
-|  existing MP3s        |
+|  existing tracks      |
 +-----------------------+</pre>
           <div style="margin-top:8px;">
-            <button class="btn" id="lib-scan-btn">[ Scan folder for existing MP3s ]</button>
+            <button class="btn" id="lib-scan-btn">[ Scan folder for existing tracks ]</button>
           </div>
         </div>
       </div>
@@ -2736,17 +2737,21 @@ $('#src-list').addEventListener('click', e=>{
 // from whatever MP3s already exist in library_dir. BPM/Camelot are left
 // blank by default; user can opt in to reading existing ID3 BPM/key tags
 // or run Analyze on selected tracks afterwards.
-$('#lib-scan-btn')?.addEventListener('click', async ()=>{
+// Scan the current folder for tracks (any audio format). Reusable so it can be
+// triggered from the empty-state button AND the always-visible header button —
+// which is how you run "analyze missing" AFTER a read-tags-only scan.
+async function runScanFolder(btn){
   if(!window.API){ toast('API not ready'); return; }
   const choice = await showModal({
     title: 'Scan folder',
     body:
-      'How should BPM and Camelot key be populated for each MP3?\n\n' +
+      'Reads every audio file in the folder (mp3, flac, wav, m4a, ogg, …).\n' +
+      'How should BPM and Camelot key be filled for each track?\n\n' +
       'Read tags only — use BPM/key already written into the file.\n' +
-      'Tracks with no tags stay unlabeled (you can run Analyze\n' +
-      'on selected tracks later).\n\n' +
+      'Tracks with no tags stay unlabeled — run this again and pick\n' +
+      '"Analyze missing" (or use [ Analyze ] on a row) to fill them later.\n\n' +
       'Analyze missing — read existing tags AND run librosa\n' +
-      '(~3s per track) on tracks that have no BPM/key tag yet.',
+      '(~3s per track) on tracks that have no BPM/key yet.',
     cancel: 'Abort',
     third: 'Read tags only',
     ok: 'Analyze missing',
@@ -2755,10 +2760,8 @@ $('#lib-scan-btn')?.addEventListener('click', async ()=>{
   // OK = "Analyze missing", third = "Read tags only". Both options read tags;
   // analyze_missing also runs librosa for unlabeled tracks.
   const analyzeMissing = choice === true;
-  const btn = $('#lib-scan-btn');
-  btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = '[ Scanning... ]';
+  const orig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '[ Scanning... ]'; }
   try {
     // Both modes read existing tags; analyzeMissing additionally runs librosa.
     const r = await window.API.scanLibrary({
@@ -2778,10 +2781,11 @@ $('#lib-scan-btn')?.addEventListener('click', async ()=>{
   } catch(err){
     toast('scan failed: ' + err.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
+    if(btn){ btn.disabled = false; btn.textContent = orig; }
   }
-});
+}
+$('#lib-scan-btn')?.addEventListener('click', (e)=> runScanFolder(e.currentTarget));
+$('#lib-scan-hdr')?.addEventListener('click', (e)=> runScanFolder(e.currentTarget));
 
 // ---------- bulk actions on selected tracks ----------
 async function runBulk(label, fn){

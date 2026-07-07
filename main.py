@@ -51,6 +51,22 @@ _SANITIZE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 CSV_FIELDS = ["camelot", "bpm", "artist", "title", "album", "key", "source", "file", "spotify_id"]
 
+# Audio formats the library will read / scan / analyze (downloads are always
+# mp3, but a folder may already hold flac/wav/etc. that should still show up).
+AUDIO_EXTS = {
+    ".mp3", ".flac", ".wav", ".m4a", ".mp4", ".aac", ".alac",
+    ".ogg", ".oga", ".opus", ".aiff", ".aif", ".wma",
+}
+
+
+def audio_files(out_dir: Path) -> list[Path]:
+    """All audio files under out_dir (any supported format), excluding the
+    _tmp/ download-staging area. Replaces the old mp3-only rglob."""
+    return [
+        p for p in out_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS and "_tmp" not in p.parts
+    ]
+
 
 def safe_filename(s: str, max_len: int = 120) -> str:
     s = _SANITIZE.sub("_", s).strip().rstrip(".")
@@ -233,9 +249,9 @@ def reconstruct_row_from_disk(track: Track, out_dir: Path) -> dict | None:
     """Find an mp3 anywhere under out_dir matching this track's artist-title and
     rebuild its row from ID3 tags. Lets --skip-existing survive CSV loss and
     finds files already moved into BPM bucket subfolders."""
-    suffix = safe_filename(f"{track.primary_artist} - {track.title}") + ".mp3"
-    for p in out_dir.rglob("*.mp3"):
-        if not p.name.endswith(suffix):
+    stem_suffix = safe_filename(f"{track.primary_artist} - {track.title}")
+    for p in audio_files(out_dir):
+        if not p.stem.endswith(stem_suffix):
             continue
         bpm: int | str = ""
         camelot = ""
@@ -327,12 +343,18 @@ def _expected_filename(row: dict, key_format: str = "camelot") -> str | None:
     if not (camelot and bpm_int is not None and artist and title):
         return None
     prefix = _key_prefix(camelot, row.get("key", "") or "", key_format)
-    return safe_filename(f"{prefix} - {bpm_int:03d} - {artist} - {title}") + ".mp3"
+    # Preserve the file's real extension (flac/wav/…), not a hardcoded .mp3, so a
+    # rename of a non-mp3 file doesn't lie about its format.
+    ext = Path(row.get("file", "")).suffix.lower()
+    if ext not in AUDIO_EXTS:
+        ext = ".mp3"
+    return safe_filename(f"{prefix} - {bpm_int:03d} - {artist} - {title}") + ext
 
 
 def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) -> Path | None:
-    """Locate the MP3 for this row on disk, tolerating out-of-sync filenames.
-    Exact filename match first (fast dict lookup), then artist/title suffix fallback."""
+    """Locate the track file for this row on disk (any audio format), tolerating
+    out-of-sync filenames. Exact filename match first (fast dict lookup), then an
+    extension-agnostic artist/title stem fallback."""
     expected = row.get("file")
     if expected and expected in by_name:
         return by_name[expected]
@@ -340,8 +362,8 @@ def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) 
     title = safe_filename(row.get("title", ""))
     if not (artist and title):
         return None
-    suffix = f" - {artist} - {title}.mp3"
-    matches = [p for p in all_paths if p.name.endswith(suffix)]
+    stem_suffix = f" - {artist} - {title}"
+    matches = [p for p in all_paths if p.stem.endswith(stem_suffix)]
     if len(matches) == 1:
         return matches[0]
     # 0 matches, or AMBIGUOUS (two distinct tracks share artist/title): refuse
@@ -367,7 +389,7 @@ def reanalyze_rows(
     is set, in which case every file is forced to `key_format`.
 
     Returns the count of rows whose values actually changed."""
-    all_paths = list(out_dir.rglob("*.mp3"))
+    all_paths = audio_files(out_dir)
     by_name: dict[str, Path] = {p.name: p for p in all_paths}
     changed = 0
     for row in tqdm(rows, desc="Reanalyzing"):
