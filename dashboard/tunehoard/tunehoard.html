@@ -785,7 +785,7 @@ hr.tilde::before{
  #+#     #+#    #+# #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#     #+# #+#    #+# #+#    #+#     
 ###      ########  ###    #### ########## ###    ###  ########  ###     ### ###    ### #########       
 </pre>
-    <div class="tagline">Spotify / YouTube / SoundCloud  →  MP3 with BPM + Camelot tags</div>
+    <div class="tagline">Spotify / Apple Music / YouTube / SoundCloud  →  MP3 with BPM + Camelot tags</div>
   </div>
 
   <!-- URL INPUT -->
@@ -795,7 +795,7 @@ hr.tilde::before{
     </div>
     <div class="box-body">
       <div class="url-row">
-        <input id="url" type="text" placeholder="paste a Spotify, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
+        <input id="url" type="text" placeholder="paste a Spotify, Apple Music, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
         <button class="btn hidden" id="browse-spotify-btn">[ Browse Spotify ]</button>
         <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
       </div>
@@ -1166,6 +1166,15 @@ function detectURL(u){
     if(h.includes('soundcloud')){
       if(url.pathname.split('/').filter(Boolean).length >= 3) return {kind:'sc-tr', label:'SoundCloud track: Yung Lain — Sextrance Worldwide'};
       return {kind:'sc-pl', label:'SoundCloud playlist: "afters" — 22 tracks'};
+    }
+    if(h === 'music.apple.com' || h.endsWith('.music.apple.com')){
+      // The real title/count comes from the backend preview; these are just
+      // placeholder labels + a non-'bad' kind so the Download button is enabled.
+      // Unknown Apple paths default to am-pl so the backend supplies the
+      // specific error (personal-library link, unsupported page, etc.).
+      if(url.pathname.includes('/song/') || url.searchParams.get('i')) return {kind:'am-tr', label:'Apple Music song'};
+      if(url.pathname.includes('/album/')) return {kind:'am-al', label:'Apple Music album'};
+      return {kind:'am-pl', label:'Apple Music playlist'};
     }
     return {kind:'bad'};
   } catch(e){
@@ -3076,6 +3085,7 @@ $('#w-continue').addEventListener('click', async ()=>{
 
   function srcFromUrl(u){
     if(!u) return 'Unknown';
+    if(u.includes('music.apple')) return 'Apple Music';
     if(u.includes('spotify')) return 'Spotify';
     if(u.includes('youtu')) return 'YouTube';
     if(u.includes('soundcloud')) return 'SoundCloud';
@@ -3262,10 +3272,15 @@ $('#w-continue').addEventListener('click', async ()=>{
       const artist = escapeHtml(f.artist || '');
       const title = escapeHtml(f.title || '');
       const url = escapeHtml(f.spotify_url || '');
+      const openLabel = url.includes('music.apple') ? 'open Apple Music'
+        : url.includes('spotify') ? 'open Spotify'
+        : url.includes('youtu') ? 'open YouTube'
+        : url.includes('soundcloud') ? 'open SoundCloud'
+        : 'open link';
       return `<div class="failure-row" style="font-family:var(--mono); display:flex; justify-content:space-between; gap:12px; padding:1px 0;">`
         + `<span>× ${artist} — ${title}</span>`
         + `<span class="fail-actions">`
-        +   `<a class="tlink" data-fail-act="open" data-fail-idx="${i}" data-url="${url}">[open Spotify]</a>`
+        +   `<a class="tlink" data-fail-act="open" data-fail-idx="${i}" data-url="${url}">[${openLabel}]</a>`
         +   `<a class="tlink" data-fail-act="retry" data-fail-idx="${i}" data-url="${url}">[ retry ]</a>`
         +   `<a class="tlink" data-fail-act="dismiss" data-fail-idx="${i}" data-url="${url}">[ &#215; ]</a>`
         + `</span>`

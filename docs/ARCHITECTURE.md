@@ -5,11 +5,14 @@ Pipeline details and module contracts. Read `CLAUDE.md` first.
 ## Pipeline
 
 ```
-URL (Spotify / YouTube / SoundCloud — playlist OR single track)
+URL (Spotify / Apple Music / YouTube / SoundCloud — playlist, album, OR single track)
       │
       ▼  main.main() dispatcher routes by URL pattern:
       │     - youtube.com / youtu.be → ytdlp_loader.get_ytdlp_tracks(url, "yt")
       │     - soundcloud.com         → ytdlp_loader.get_ytdlp_tracks(url, "sc")
+      │     - music.apple.com/.../playlist/pl.X → applemusic_client.get_playlist_tracks(url)
+      │     - music.apple.com/.../album/X       → applemusic_client.get_album_tracks(url)
+      │     - music.apple.com/.../song/X (or ?i=) → applemusic_client.get_track(url)
       │     - open.spotify.com/track/X → spotify_client.get_track(url, ...)
       │     - open.spotify.com/playlist/X → spotify_client.get_playlist_tracks(url, ...)
       │
@@ -23,7 +26,7 @@ list[Track]  (id, title, artists, album, duration_ms, isrc, source_url)
       ▼  for each remaining track:
       │    if track.source_url (YT/SC entries):
       │      downloader.download_url(source_url, tmp_dir)
-      │    else (Spotify entries):
+      │    else (Spotify / Apple Music entries):
       │      for source in sources ("youtube,soundcloud" by default):
       │        downloader.download_track(query, tmp_dir, source)
       │        if hit → break
@@ -55,6 +58,15 @@ out_dir/failures.txt    (if any track matched no source)
 - `get_track(url, cid, secret) -> ("singles", [Track])` — fetches a single track via `sp.track()`. Returns the literal folder name `"singles"` so any single-track download lands in `<out>/singles/` regardless of source.
 - `get_liked_songs(cid, secret) -> ("Liked Songs", list[Track])` — paginates `current_user_saved_tracks(limit=50, offset=N)` until exhausted. Reads `entry["track"] or entry["item"]` for forward-compat (saved-tracks still uses `track`; the rename to `item` happened only on `playlist_items`). Skips null entries (unavailable tracks / podcast episodes). Used by the `spotify:liked` URL sentinel — `main.py`'s dispatcher recognizes that string before any regex and routes here.
 - Uses `spotipy.SpotifyOAuth` with scopes `playlist-read-private playlist-read-collaborative user-library-read`. The `user-library-read` was appended in 2026 for the picker / liked-songs flow; pre-existing tokens trigger a one-time re-auth on the next saved-tracks call. First run opens a browser for user authorization, caches token to `.spotify_cache`. Why not Client Credentials? See `docs/GOTCHAS.md` — Spotify started returning 401 on `playlist_items` for Client Credentials in 2025.
+
+### `applemusic_client.py`
+
+- Imports `Track` from `spotify_client` (no shared-module split). Returns tracks with `source_url=None`, so they take the same YouTube/SoundCloud **search** path as Spotify entries; the `spotify_id` is namespaced `am:<catalog_id>` (Apple Adam IDs are storefront-independent, so a `/us/` and `/it/` link to the same song dedupe identically).
+- `get_playlist_tracks(url) -> (playlist_name, list[Track])` — reads the name via `?fields=name`, then paginates the `/tracks` subresource by following the `next` cursor (50/page) until absent.
+- `get_album_tracks(url) -> (album_name, list[Track])` — one call with `include=tracks`, paginating `relationships.tracks.next` for >100-track albums.
+- `get_track(url) -> ("singles", [Track])` — single song via `/songs/{id}`; also handles album URLs carrying `?i=<trackId>`.
+- `classify_url(url)` / `is_applemusic_url(url)` — dispatch helpers for `main.py` / `server.py`. `_parse_url` extracts `(kind, storefront, id)`; personal-library (`/library/...`) and artist/curator/station pages raise `AppleMusicError` with a user-facing message (surfaced verbatim by the CLI `sys.exit` and the `/api/preview` handler).
+- **Auth: none.** `_get_token()` scrapes the anonymous web-player JWT from music.apple.com's JS bundle (regex `eyJ…​.eyJ…​.…`), decodes its `exp`, and caches `{token, exp}` to `.applemusic_token` (atomic tmp+replace). `_api_get` sends it to `amp-api.music.apple.com` with an `Origin: https://music.apple.com` header; on a 401 it force-refreshes the token once and retries, on 429 it honors `Retry-After` once. Requires `requests`.
 
 ### `ytdlp_loader.py`
 
@@ -165,7 +177,7 @@ All endpoints live under `/api/`. Server-side helpers are imported from `main.py
 |---|---|
 | `GET /api/settings` | Returns settings dict. `spotify_client_secret` is masked (`********`) so the client doesn't echo it back as a literal value. |
 | `PATCH /api/settings` | Partial update; client must omit (not echo) the masked secret. Persists to `.tunehoard_settings.json`. The deprecated `output_dir` key is silently dropped by `save_settings`. |
-| `GET /api/preview?url=` | Lightweight URL → title resolution. YT/SC use `extract_flat`; Spotify uses spotipy. Used by the dashboard's URL bar to replace the mock detection labels with real titles. Returns `{kind, label, name?, track_count?}`. Doesn't download. |
+| `GET /api/preview?url=` | Lightweight URL → title resolution. YT/SC use `extract_flat`; Spotify uses spotipy; Apple Music uses the anonymous web token. Used by the dashboard's URL bar to replace the mock detection labels with real titles. Returns `{kind, label, name?, track_count?}` where `kind` is one of `yt-pl/yt-tr`, `sc-pl/sc-tr`, `sp-pl/sp-tr`, `am-pl/am-al/am-tr`, `spotify_liked`, `sp-unconfigured`, `unsupported`, `error`, `empty`. Doesn't download. |
 | `GET /api/library` | Reads `<library_dir>/index.csv`, returns `[{id, cam, key, bpm, artist, title, source, bucket, file}]`. `key` field is the *short* musical form (`"Am"`), not the full `"A minor"`. Tracks with empty BPM get `bucket: "unknown-bpm"` (not a numeric range). |
 | `POST /api/library/scan?read_bpm_key=&analyze_missing=` | Walks `library_dir` for MP3s and merges new rows into `index.csv`. Always reads title/artist/album. `read_bpm_key=true` also pulls TBPM/TKEY/TXXX. `analyze_missing=true` (implies `read_bpm_key=true`) additionally runs `analyzer.analyze()` on tracks lacking BPM/Camelot. **The `analyze_missing=true` path is now async** — returns `{scan_id, status: "queued"}` immediately and runs in a daemon thread with state pushed via `/ws/jobs` as `{type: "scan_update", scan: {...}}`. The synchronous fast-paths (no flags, or `read_bpm_key=true` only) still return `{total, added, kept, filled, csv}` directly. Smart-fill: existing rows preserved, blank fields backfilled. |
 | `GET /api/library/scan/{scan_id}` | Returns the current scan record `{id, status, progress, total, log, started_at, finished_at}`. 404 on unknown id. |

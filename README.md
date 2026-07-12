@@ -1,9 +1,9 @@
 # TuneHoard
 
-Download Spotify, YouTube, and SoundCloud playlists or tracks as 320 kbps MP3s
-with BPM and musical key auto-detected, tagged into ID3 frames, and organized
-into BPM-range subfolders. Built for DJ prep — the output drops straight into
-Rekordbox, Traktor, or Serato.
+Download Spotify, Apple Music, YouTube, and SoundCloud playlists or tracks as
+320 kbps MP3s with BPM and musical key auto-detected, tagged into ID3 frames,
+and organized into BPM-range subfolders. Built for DJ prep — the output drops
+straight into Rekordbox, Traktor, or Serato.
 
 ## Quick start (no terminal, no Python)
 
@@ -79,7 +79,9 @@ next to `[ Download >> ]` for picking from your saved playlists + Liked Songs.
 
 ## Features
 
-- **Sources**: Spotify, YouTube, SoundCloud — playlists or single tracks/videos
+- **Sources**: Spotify, Apple Music, YouTube, SoundCloud — playlists or single
+  tracks/videos (Apple Music also takes album links; no account needed — paste a
+  public `music.apple.com` link)
 - **`spotify:liked`** virtual playlist — downloads your entire Liked Songs
 - **Local analysis** — librosa BPM detection + Krumhansl-Schmuckler musical key
 - **Tags** — `TBPM`, `TKEY`, `TXXX:CAMELOT_KEY`, `TXXX:MUSICAL_KEY`, `COMM`,
@@ -205,6 +207,6 @@ MIT for the TuneHoard source code. Bundled in the binary:
 - [librosa](https://librosa.org/) — ISC
 - [FastAPI](https://fastapi.tiangolo.com/) — MIT
 
-Spotify, YouTube, and SoundCloud are trademarks of their respective owners.
+Spotify, Apple Music, YouTube, and SoundCloud are trademarks of their respective owners.
 TuneHoard is an independent tool and is not affiliated with or endorsed by any
 of them. Use it to download content you have the right to download.

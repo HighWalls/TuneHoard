@@ -109,6 +109,14 @@ from main import (  # type: ignore[no-redef]
     safe_filename,
     safe_replace,
 )
+from applemusic_client import (
+    AppleMusicError,
+    classify_url as am_classify_url,
+    get_album_tracks as am_get_album_tracks,
+    get_playlist_tracks as am_get_playlist_tracks,
+    get_track as am_get_track,
+    is_applemusic_url,
+)
 from spotify_client import _spotify_client, get_liked_songs, get_playlist_tracks, get_track
 from tagger import tag_file
 from ytdlp_loader import get_ytdlp_tracks, is_soundcloud_url, is_youtube_url
@@ -445,10 +453,10 @@ def _spawn_job(
     # forever on spotipy's interactive browser OAuth (the subprocess has no
     # terminal/stdin), which the dashboard shows as a job stuck "downloading"
     # that never finishes or cancels cleanly. Fail fast with a clear message.
-    # YouTube / SoundCloud need no auth, so they're exempt.
+    # YouTube / SoundCloud / Apple Music need no auth, so they're exempt.
     needs_spotify = (
         url.strip().lower() == "spotify:liked"
-        or not (is_youtube_url(url) or is_soundcloud_url(url))
+        or not (is_youtube_url(url) or is_soundcloud_url(url) or is_applemusic_url(url))
     )
     if needs_spotify and not (PROJECT_ROOT / ".spotify_cache").exists():
         raise HTTPException(
@@ -751,7 +759,8 @@ def api_preview(url: str) -> dict[str, Any]:
     """Hit the right loader to get a real title/track-count for the input URL.
 
     YouTube / SoundCloud go through yt-dlp's extract_info (extract_flat). Spotify
-    goes through spotipy if creds are configured. No downloading happens.
+    goes through spotipy if creds are configured. Apple Music uses the anonymous
+    web token (no creds). No downloading happens.
     """
     url = (url or "").strip()
     if not url:
@@ -785,6 +794,27 @@ def api_preview(url: str) -> dict[str, Any]:
             name, tracks = get_ytdlp_tracks(url, "sc")
             src_label, src_short = "SoundCloud", "sc"
             single_word = "track"
+        elif is_applemusic_url(url):
+            try:
+                kind = am_classify_url(url)
+                if kind == "song":
+                    name, tracks = am_get_track(url)
+                elif kind == "album":
+                    name, tracks = am_get_album_tracks(url)
+                    return {
+                        "kind": "am-al",
+                        "label": f'Apple Music album: "{name}" — {len(tracks)} tracks',
+                        "name": name,
+                        "track_count": len(tracks),
+                    }
+                else:
+                    name, tracks = am_get_playlist_tracks(url)
+            except AppleMusicError as e:
+                # The outer handler only surfaces the exception type name; catch
+                # here so the user sees the real, actionable message.
+                return {"kind": "unsupported", "label": str(e)}
+            src_label, src_short = "Apple Music", "am"
+            single_word = "song"
         elif "open.spotify.com" in url or url.startswith("spotify:"):
             cid, cs = s["spotify_client_id"], s["spotify_client_secret"]
             if not cid or not cs:

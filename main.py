@@ -40,6 +40,14 @@ from mutagen.id3 import ID3, ID3NoHeaderError
 from tqdm import tqdm
 
 from analyzer import analyze
+from applemusic_client import (
+    AppleMusicError,
+    classify_url as am_classify_url,
+    get_album_tracks as am_get_album_tracks,
+    get_playlist_tracks as am_get_playlist_tracks,
+    get_track as am_get_track,
+    is_applemusic_url,
+)
 from camelot import musical_key_short
 from downloader import download_track, download_url
 from spotify_client import Track, get_liked_songs, get_playlist_tracks, get_track
@@ -572,6 +580,22 @@ def main() -> int:
     elif is_soundcloud_url(url):
         print("Fetching from SoundCloud...")
         playlist_name, tracks = get_ytdlp_tracks(url, "sc")
+    elif is_applemusic_url(url):
+        # Apple Music needs no credentials (anonymous web token). Must come
+        # before the Spotify else-branch, which sys.exits without SPOTIFY creds.
+        try:
+            kind = am_classify_url(url)
+            if kind == "song":
+                print("Fetching Apple Music song...")
+                playlist_name, tracks = am_get_track(url)
+            elif kind == "album":
+                print("Fetching Apple Music album...")
+                playlist_name, tracks = am_get_album_tracks(url)
+            else:
+                print("Fetching Apple Music playlist...")
+                playlist_name, tracks = am_get_playlist_tracks(url)
+        except AppleMusicError as e:
+            sys.exit(str(e))
     else:
         cid = os.getenv("SPOTIFY_CLIENT_ID")
         cs = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -769,12 +793,17 @@ def main() -> int:
             f.write("# Format: Artist - Title\tURL\n\n")
             for t in failures:
                 # spotify_id is a namespaced key: 'yt:<id>'/'sc:<id>' for direct
-                # entries (which carry a real source_url), raw id for Spotify.
-                # Only Spotify ids map to an open.spotify.com/track URL; writing
-                # one for a YT/SC id sends the dashboard's retry to a guaranteed
+                # entries (which carry a real source_url), 'am:<id>' for Apple
+                # Music, raw id for Spotify. Each source needs a URL its own
+                # retry can actually re-fetch, so the dashboard's [retry] doesn't
                 # 404. Prefer the real source URL when we have it.
                 if t.source_url:
                     url = t.source_url
+                elif t.spotify_id.startswith("am:"):
+                    # Storefront-less on purpose: music.apple.com/song/<id>
+                    # geo-redirects to the visitor's storefront, and our parser
+                    # defaults to 'us' on retry.
+                    url = f"https://music.apple.com/song/{t.spotify_id.split(':', 1)[1]}"
                 elif ":" in t.spotify_id:
                     url = t.spotify_id
                 else:
