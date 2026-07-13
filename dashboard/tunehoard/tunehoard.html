@@ -206,6 +206,17 @@ input[type="text"]:focus::placeholder{ color:color-mix(in srgb, var(--ink) 30%, 
 .status-line.err{ font-weight:700; }
 .status-line.err::before{ content:"!! "; }
 
+.url-tracklist{
+  margin-top:6px; max-height:240px; overflow-y:auto;
+  border:1px solid var(--ink); padding:6px 10px;
+  font-family:var(--mono); font-size:12px; line-height:1.55;
+}
+.url-tracklist .tl-row{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.url-tracklist .tl-num{ display:inline-block; min-width:3ch; margin-right:8px; text-align:right; opacity:.45; }
+.url-tracklist .tl-artist{ font-weight:700; }
+.url-tracklist .tl-sep{ opacity:.55; }
+.url-tracklist .tl-more{ margin-top:4px; opacity:.6; }
+
 .checkrow{
   display:flex; gap:24px; flex-wrap:wrap;
   margin-top:10px; margin-bottom:8px;
@@ -800,6 +811,7 @@ hr.tilde::before{
         <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
       </div>
       <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
+      <div class="url-tracklist hidden" id="url-tracklist"></div>
     </div>
   </div>
 
@@ -1147,6 +1159,34 @@ const pad3 = n => String(n).padStart(3,'0');
 
 // ---------- URL detection (mock) ----------
 const URL_STATUS = $('#url-status');
+const URL_TRACKLIST = $('#url-tracklist');
+
+// Show / hide the track-name list under the URL bar. The backend preview
+// returns `tracks` (capped) for playlist / album URLs; single tracks and
+// errors clear it.
+function clearTracklist(){
+  URL_TRACKLIST.classList.add('hidden');
+  URL_TRACKLIST.innerHTML = '';
+}
+function renderTracklist(j){
+  const tr = (j && j.tracks) || [];
+  if(!tr.length){ clearTracklist(); return; }
+  const rows = tr.map((t, i) => {
+    const artist = escapeHtml(t.artist || 'Unknown');
+    const title = escapeHtml(t.title || '');
+    return `<div class="tl-row"><span class="tl-num">${i+1}</span>`
+      + `<span class="tl-artist">${artist}</span>`
+      + `<span class="tl-sep"> — </span>${title}</div>`;
+  });
+  const shown = tr.length, total = (typeof j.track_count === 'number') ? j.track_count : shown;
+  if(total > shown){
+    rows.push(`<div class="tl-more">… +${total - shown} more (download to get them all)</div>`);
+  }
+  URL_TRACKLIST.innerHTML = rows.join('');
+  URL_TRACKLIST.scrollTop = 0;
+  URL_TRACKLIST.classList.remove('hidden');
+}
+
 function detectURL(u){
   u = u.trim();
   if(!u) return {kind:'empty'};
@@ -1211,19 +1251,21 @@ function setStatus(){
       URL_STATUS.textContent = 'Spotify: ' + trimmed;
     }
     _previewCurrent = trimmed;
+    clearTracklist();
     if(_previewTimer){ clearTimeout(_previewTimer); _previewTimer = null; }
     if(_previewAbort){ _previewAbort.abort(); _previewAbort = null; }
     return;
   }
   const r = detectURL(u);
   URL_STATUS.classList.remove('ok','err');
-  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; return; }
-  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; _previewCurrent=''; return; }
+  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; clearTracklist(); return; }
+  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; _previewCurrent=''; clearTracklist(); return; }
   if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')){
     URL_STATUS.classList.add('err');
     URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
     $('#status-settings').onclick = ()=> showSettings();
     _previewCurrent='';
+    clearTracklist();
     return;
   }
   // Don't show any local placeholder; wait for the real title from backend.
@@ -1233,6 +1275,7 @@ function setStatus(){
   if(_previewTimer) clearTimeout(_previewTimer);
   if(_previewAbort) _previewAbort.abort();
   if(u === _previewCurrent) return;
+  clearTracklist();  // URL changed — drop stale names until the new list arrives
   _previewTimer = setTimeout(()=>{
     _previewAbort = new AbortController();
     const expected = u;
@@ -1246,12 +1289,15 @@ function setStatus(){
           URL_STATUS.classList.add('err');
           URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
           $('#status-settings').onclick = ()=> showSettings();
+          clearTracklist();
         } else if(j.kind === 'unsupported' || j.kind === 'error'){
           URL_STATUS.classList.add('err');
           URL_STATUS.textContent = j.label;
+          clearTracklist();
         } else {
           URL_STATUS.classList.add('ok');
           URL_STATUS.textContent = j.label;
+          renderTracklist(j);   // playlist / album → show names; single track clears
         }
         _previewCurrent = expected;
       })
@@ -1259,6 +1305,7 @@ function setStatus(){
         if(err.name === 'AbortError') return;
         URL_STATUS.classList.remove('ok'); URL_STATUS.classList.add('err');
         URL_STATUS.textContent = 'preview failed: ' + err.message;
+        clearTracklist();
       });
   }, 450);
 }

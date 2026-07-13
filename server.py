@@ -754,13 +754,24 @@ def api_patch_settings(patch: SettingsPatch) -> dict[str, Any]:
 
 
 # ── URL preview (lightweight, no download) ────────────────────────────
+# Cap how many track names the preview returns. The list is already fetched to
+# count it, so this only bounds the JSON payload for very large playlists — the
+# dashboard shows a "+N more" line when track_count exceeds what's returned.
+_PREVIEW_TRACK_CAP = 500
+
+
+def _preview_tracklist(tracks: list) -> list[dict[str, str]]:
+    return [{"artist": t.primary_artist, "title": t.title} for t in tracks[:_PREVIEW_TRACK_CAP]]
+
+
 @app.get("/api/preview")
 def api_preview(url: str) -> dict[str, Any]:
     """Hit the right loader to get a real title/track-count for the input URL.
 
     YouTube / SoundCloud go through yt-dlp's extract_info (extract_flat). Spotify
     goes through spotipy if creds are configured. Apple Music uses the anonymous
-    web token (no creds). No downloading happens.
+    web token (no creds). No downloading happens. Playlist / album previews also
+    return the (capped) track list so the dashboard can show track names.
     """
     url = (url or "").strip()
     if not url:
@@ -806,6 +817,7 @@ def api_preview(url: str) -> dict[str, Any]:
                         "label": f'Apple Music album: "{name}" — {len(tracks)} tracks',
                         "name": name,
                         "track_count": len(tracks),
+                        "tracks": _preview_tracklist(tracks),
                     }
                 else:
                     name, tracks = am_get_playlist_tracks(url)
@@ -851,6 +863,7 @@ def api_preview(url: str) -> dict[str, Any]:
         "label": f'{src_label} playlist: "{name}" — {len(tracks)} tracks',
         "name": name,
         "track_count": len(tracks),
+        "tracks": _preview_tracklist(tracks),
     }
 
 
