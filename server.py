@@ -440,6 +440,7 @@ def _spawn_job(
     skip_analyze: bool,
     key_format: str,
     limit: int,
+    exclude_ids: list[str] | None = None,
 ) -> str:
     job_id = f"j{int(time.time() * 1000)}"
     s = load_settings()
@@ -496,6 +497,14 @@ def _spawn_job(
         args.append("--skip-analyze")
     if limit:
         args.extend(["--limit", str(limit)])
+    # Deselected tracks from the preview. Sanitize to the id charset (they're our
+    # own namespaced ids: word chars, ':', '.', '-') and cap the count so a
+    # malicious localhost caller can't blow past the OS command-line limit.
+    if exclude_ids:
+        safe = [x for x in exclude_ids if x and re.fullmatch(r"[\w:.\-]{1,64}", x)]
+        safe = safe[:_PREVIEW_TRACK_CAP]
+        if safe:
+            args.extend(["--exclude-ids", ",".join(safe)])
 
     env = os.environ.copy()
     if s["spotify_client_id"]:
@@ -761,7 +770,13 @@ _PREVIEW_TRACK_CAP = 500
 
 
 def _preview_tracklist(tracks: list) -> list[dict[str, str]]:
-    return [{"artist": t.primary_artist, "title": t.title} for t in tracks[:_PREVIEW_TRACK_CAP]]
+    # `id` is the namespaced spotify_id (am:/yt:/sc:/raw Spotify) — the same key
+    # main.py dedups on — so the dashboard can pass back a list of deselected
+    # ids and the download filters them out.
+    return [
+        {"id": t.spotify_id, "artist": t.primary_artist, "title": t.title}
+        for t in tracks[:_PREVIEW_TRACK_CAP]
+    ]
 
 
 @app.get("/api/preview")
@@ -1768,6 +1783,9 @@ class JobReq(BaseModel):
     skip_analyze: bool | None = None
     key_format: str | None = None
     limit: int = 0
+    # Track ids (namespaced spotify_id) the user unticked in the preview list —
+    # these are dropped before downloading. Empty = download the whole playlist.
+    exclude_ids: list[str] | None = None
 
 
 @app.post("/api/jobs")
@@ -1787,6 +1805,7 @@ def api_start_job(req: JobReq) -> dict[str, Any]:
         skip_analyze=skip_a,
         key_format=req.key_format or s["key_format"],
         limit=req.limit,
+        exclude_ids=req.exclude_ids or [],
     )
     # Broadcast immediately so connected WS clients see the new job appear
     # without waiting for the runner thread's first stdout line.

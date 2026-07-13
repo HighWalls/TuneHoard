@@ -211,10 +211,22 @@ input[type="text"]:focus::placeholder{ color:color-mix(in srgb, var(--ink) 30%, 
   border:1px solid var(--ink); padding:6px 10px;
   font-family:var(--mono); font-size:12px; line-height:1.55;
 }
-.url-tracklist .tl-row{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.url-tracklist .tl-num{ display:inline-block; min-width:3ch; margin-right:8px; text-align:right; opacity:.45; }
+.url-tracklist .tl-head{
+  display:flex; justify-content:space-between; gap:8px;
+  padding-bottom:4px; margin-bottom:4px; border-bottom:1px solid var(--ink);
+  position:sticky; top:-6px; background:var(--paper);
+}
+.url-tracklist .tl-count{ font-weight:700; }
+.url-tracklist .tl-row{ display:flex; align-items:baseline; gap:8px; }
+.url-tracklist .tl-num{ flex:none; min-width:3ch; text-align:right; opacity:.45; }
+.url-tracklist .tl-name{ flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .url-tracklist .tl-artist{ font-weight:700; }
 .url-tracklist .tl-sep{ opacity:.55; }
+.url-tracklist .tl-check{ flex:none; cursor:pointer; user-select:none; opacity:.85; }
+.url-tracklist .tl-check:hover{ opacity:1; text-decoration:underline; }
+.url-tracklist .tl-row.off{ opacity:.4; }
+.url-tracklist .tl-row.off .tl-name{ text-decoration:line-through; }
+.url-tracklist .tl-row.off .tl-check{ opacity:1; }
 .url-tracklist .tl-more{ margin-top:4px; opacity:.6; }
 
 .checkrow{
@@ -1163,29 +1175,79 @@ const URL_TRACKLIST = $('#url-tracklist');
 
 // Show / hide the track-name list under the URL bar. The backend preview
 // returns `tracks` (capped) for playlist / album URLs; single tracks and
-// errors clear it.
+// errors clear it. Each row has a right-side [x]/[ ] toggle — all ticked by
+// default; unticked ids are collected at download time and skipped.
 function clearTracklist(){
   URL_TRACKLIST.classList.add('hidden');
   URL_TRACKLIST.innerHTML = '';
+  URL_TRACKLIST.removeAttribute('data-url');
 }
-function renderTracklist(j){
+function renderTracklist(j, forUrl){
   const tr = (j && j.tracks) || [];
   if(!tr.length){ clearTracklist(); return; }
+  const shown = tr.length, total = (typeof j.track_count === 'number') ? j.track_count : shown;
   const rows = tr.map((t, i) => {
     const artist = escapeHtml(t.artist || 'Unknown');
     const title = escapeHtml(t.title || '');
-    return `<div class="tl-row"><span class="tl-num">${i+1}</span>`
-      + `<span class="tl-artist">${artist}</span>`
-      + `<span class="tl-sep"> — </span>${title}</div>`;
+    const id = escapeHtml(t.id || '');
+    return `<div class="tl-row" data-id="${id}">`
+      + `<span class="tl-num">${i+1}</span>`
+      + `<span class="tl-name"><span class="tl-artist">${artist}</span><span class="tl-sep"> — </span>${title}</span>`
+      + `<span class="tl-check" role="checkbox" aria-checked="true" title="click to deselect">[x]</span>`
+      + `</div>`;
   });
-  const shown = tr.length, total = (typeof j.track_count === 'number') ? j.track_count : shown;
-  if(total > shown){
-    rows.push(`<div class="tl-more">… +${total - shown} more (download to get them all)</div>`);
-  }
-  URL_TRACKLIST.innerHTML = rows.join('');
+  const head = `<div class="tl-head">`
+    + `<span class="tl-count">${shown} of ${shown} selected</span>`
+    + `<span class="tl-headacts"><a class="tlink tl-all">[all]</a> <a class="tlink tl-none">[none]</a></span>`
+    + `</div>`;
+  const more = total > shown
+    ? `<div class="tl-more">… +${total - shown} more (all downloaded; only the first ${shown} are selectable here)</div>`
+    : '';
+  URL_TRACKLIST.innerHTML = head + rows.join('') + more;
+  if(forUrl) URL_TRACKLIST.setAttribute('data-url', forUrl);
   URL_TRACKLIST.scrollTop = 0;
   URL_TRACKLIST.classList.remove('hidden');
 }
+// Update the "N of M selected" counter after a toggle.
+function updateTracklistCount(){
+  const rows = URL_TRACKLIST.querySelectorAll('.tl-row');
+  const on = URL_TRACKLIST.querySelectorAll('.tl-row:not(.off)').length;
+  const c = URL_TRACKLIST.querySelector('.tl-count');
+  if(c) c.textContent = `${on} of ${rows.length} selected`;
+}
+function setRowChecked(row, on){
+  row.classList.toggle('off', !on);
+  const box = row.querySelector('.tl-check');
+  if(box){ box.textContent = on ? '[x]' : '[ ]'; box.setAttribute('aria-checked', on ? 'true' : 'false'); }
+}
+// Ids of unticked tracks for the currently-previewed URL (empty unless the list
+// is visible and matches `url`). Used by the Download handler.
+function excludedTrackIds(url){
+  if(URL_TRACKLIST.classList.contains('hidden')) return [];
+  const want = (url || '').trim();
+  const have = (URL_TRACKLIST.getAttribute('data-url') || '').trim();
+  if(want && have !== want) return [];   // list is for a different URL — don't apply
+  return Array.from(URL_TRACKLIST.querySelectorAll('.tl-row.off'))
+    .map(r => r.getAttribute('data-id')).filter(Boolean);
+}
+// Delegated toggle handling (the list is re-rendered via innerHTML each preview,
+// so one listener on the container survives re-renders).
+URL_TRACKLIST.addEventListener('click', (e) => {
+  const box = e.target.closest('.tl-check');
+  if(box){
+    const row = box.closest('.tl-row');
+    setRowChecked(row, row.classList.contains('off'));  // flip
+    updateTracklistCount();
+    return;
+  }
+  if(e.target.closest('.tl-all')){
+    URL_TRACKLIST.querySelectorAll('.tl-row').forEach(r => setRowChecked(r, true));
+    updateTracklistCount();
+  } else if(e.target.closest('.tl-none')){
+    URL_TRACKLIST.querySelectorAll('.tl-row').forEach(r => setRowChecked(r, false));
+    updateTracklistCount();
+  }
+});
 
 function detectURL(u){
   u = u.trim();
@@ -1297,7 +1359,7 @@ function setStatus(){
         } else {
           URL_STATUS.classList.add('ok');
           URL_STATUS.textContent = j.label;
-          renderTracklist(j);   // playlist / album → show names; single track clears
+          renderTracklist(j, expected);   // playlist / album → show names; single track clears
         }
         _previewCurrent = expected;
       })
@@ -3082,6 +3144,7 @@ $('#dl-btn').addEventListener('click', async ()=>{
       skip_existing: skipExisting,
       skip_analyze: skipAnalyze,
       key_format: keyFormat,
+      exclude_ids: excludedTrackIds(u),   // tracks the user unticked in the preview
     });
     $('#url').value = ''; setStatus();
     jobsCollapsed = false;

@@ -479,6 +479,12 @@ def main() -> int:
     )
     ap.add_argument("--limit", type=int, default=0, help="Only process first N tracks (0 = all)")
     ap.add_argument(
+        "--exclude-ids",
+        default="",
+        help="Comma-separated track ids (namespaced spotify_id) to skip — the "
+        "dashboard passes tracks the user unticked in the preview.",
+    )
+    ap.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip tracks already in the output index.csv (by spotify_id)",
@@ -611,6 +617,14 @@ def main() -> int:
             print("Fetching Spotify playlist...")
             playlist_name, tracks = get_playlist_tracks(url, cid, cs)
     print(f"  → '{playlist_name}' ({len(tracks)} tracks)")
+
+    # Drop tracks the user unticked in the dashboard preview. Applied before
+    # --limit so the limit counts kept tracks, not deselected ones.
+    excluded_ids = {x for x in args.exclude_ids.split(",") if x}
+    if excluded_ids:
+        before = len(tracks)
+        tracks = [t for t in tracks if t.spotify_id not in excluded_ids]
+        print(f"  → excluded {before - len(tracks)} deselected track(s)")
 
     if args.limit > 0:
         tracks = tracks[: args.limit]
