@@ -206,6 +206,29 @@ input[type="text"]:focus::placeholder{ color:color-mix(in srgb, var(--ink) 30%, 
 .status-line.err{ font-weight:700; }
 .status-line.err::before{ content:"!! "; }
 
+.url-tracklist{
+  margin-top:6px; max-height:240px; overflow-y:auto;
+  border:1px solid var(--ink); padding:6px 10px;
+  font-family:var(--mono); font-size:12px; line-height:1.55;
+}
+.url-tracklist .tl-head{
+  display:flex; justify-content:space-between; gap:8px;
+  padding-bottom:4px; margin-bottom:4px; border-bottom:1px solid var(--ink);
+  position:sticky; top:-6px; background:var(--paper);
+}
+.url-tracklist .tl-count{ font-weight:700; }
+.url-tracklist .tl-row{ display:flex; align-items:baseline; gap:8px; }
+.url-tracklist .tl-num{ flex:none; min-width:3ch; text-align:right; opacity:.45; }
+.url-tracklist .tl-name{ flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.url-tracklist .tl-artist{ font-weight:700; }
+.url-tracklist .tl-sep{ opacity:.55; }
+.url-tracklist .tl-check{ flex:none; cursor:pointer; user-select:none; opacity:.85; }
+.url-tracklist .tl-check:hover{ opacity:1; text-decoration:underline; }
+.url-tracklist .tl-row.off{ opacity:.4; }
+.url-tracklist .tl-row.off .tl-name{ text-decoration:line-through; }
+.url-tracklist .tl-row.off .tl-check{ opacity:1; }
+.url-tracklist .tl-more{ margin-top:4px; opacity:.6; }
+
 .checkrow{
   display:flex; gap:24px; flex-wrap:wrap;
   margin-top:10px; margin-bottom:8px;
@@ -785,7 +808,7 @@ hr.tilde::before{
  #+#     #+#    #+# #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#     #+# #+#    #+# #+#    #+#     
 ###      ########  ###    #### ########## ###    ###  ########  ###     ### ###    ### #########       
 </pre>
-    <div class="tagline">Spotify / YouTube / SoundCloud  →  MP3 with BPM + Camelot tags</div>
+    <div class="tagline">Spotify / Apple Music / YouTube / SoundCloud  →  MP3 with BPM + Camelot tags</div>
   </div>
 
   <!-- URL INPUT -->
@@ -795,11 +818,12 @@ hr.tilde::before{
     </div>
     <div class="box-body">
       <div class="url-row">
-        <input id="url" type="text" placeholder="paste a Spotify, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
+        <input id="url" type="text" placeholder="paste a Spotify, Apple Music, YouTube, or SoundCloud URL — playlist or track" autocomplete="off">
         <button class="btn hidden" id="browse-spotify-btn">[ Browse Spotify ]</button>
         <button class="btn" id="dl-btn">[ Download &gt;&gt; ]</button>
       </div>
       <div class="status-line" id="url-status"><span class="muted">&nbsp;</span></div>
+      <div class="url-tracklist hidden" id="url-tracklist"></div>
     </div>
   </div>
 
@@ -1147,6 +1171,84 @@ const pad3 = n => String(n).padStart(3,'0');
 
 // ---------- URL detection (mock) ----------
 const URL_STATUS = $('#url-status');
+const URL_TRACKLIST = $('#url-tracklist');
+
+// Show / hide the track-name list under the URL bar. The backend preview
+// returns `tracks` (capped) for playlist / album URLs; single tracks and
+// errors clear it. Each row has a right-side [x]/[ ] toggle — all ticked by
+// default; unticked ids are collected at download time and skipped.
+function clearTracklist(){
+  URL_TRACKLIST.classList.add('hidden');
+  URL_TRACKLIST.innerHTML = '';
+  URL_TRACKLIST.removeAttribute('data-url');
+}
+function renderTracklist(j, forUrl){
+  const tr = (j && j.tracks) || [];
+  if(!tr.length){ clearTracklist(); return; }
+  const shown = tr.length, total = (typeof j.track_count === 'number') ? j.track_count : shown;
+  const rows = tr.map((t, i) => {
+    const artist = escapeHtml(t.artist || 'Unknown');
+    const title = escapeHtml(t.title || '');
+    const id = escapeHtml(t.id || '');
+    return `<div class="tl-row" data-id="${id}">`
+      + `<span class="tl-num">${i+1}</span>`
+      + `<span class="tl-name"><span class="tl-artist">${artist}</span><span class="tl-sep"> — </span>${title}</span>`
+      + `<span class="tl-check" role="checkbox" aria-checked="true" title="click to deselect">[x]</span>`
+      + `</div>`;
+  });
+  const head = `<div class="tl-head">`
+    + `<span class="tl-count">${shown} of ${shown} selected</span>`
+    + `<span class="tl-headacts"><a class="tlink tl-all">[all]</a> <a class="tlink tl-none">[none]</a></span>`
+    + `</div>`;
+  const more = total > shown
+    ? `<div class="tl-more">… +${total - shown} more (all downloaded; only the first ${shown} are selectable here)</div>`
+    : '';
+  URL_TRACKLIST.innerHTML = head + rows.join('') + more;
+  if(forUrl) URL_TRACKLIST.setAttribute('data-url', forUrl);
+  URL_TRACKLIST.scrollTop = 0;
+  URL_TRACKLIST.classList.remove('hidden');
+}
+// Update the "N of M selected" counter after a toggle.
+function updateTracklistCount(){
+  const rows = URL_TRACKLIST.querySelectorAll('.tl-row');
+  const on = URL_TRACKLIST.querySelectorAll('.tl-row:not(.off)').length;
+  const c = URL_TRACKLIST.querySelector('.tl-count');
+  if(c) c.textContent = `${on} of ${rows.length} selected`;
+}
+function setRowChecked(row, on){
+  row.classList.toggle('off', !on);
+  const box = row.querySelector('.tl-check');
+  if(box){ box.textContent = on ? '[x]' : '[ ]'; box.setAttribute('aria-checked', on ? 'true' : 'false'); }
+}
+// Ids of unticked tracks for the currently-previewed URL (empty unless the list
+// is visible and matches `url`). Used by the Download handler.
+function excludedTrackIds(url){
+  if(URL_TRACKLIST.classList.contains('hidden')) return [];
+  const want = (url || '').trim();
+  const have = (URL_TRACKLIST.getAttribute('data-url') || '').trim();
+  if(want && have !== want) return [];   // list is for a different URL — don't apply
+  return Array.from(URL_TRACKLIST.querySelectorAll('.tl-row.off'))
+    .map(r => r.getAttribute('data-id')).filter(Boolean);
+}
+// Delegated toggle handling (the list is re-rendered via innerHTML each preview,
+// so one listener on the container survives re-renders).
+URL_TRACKLIST.addEventListener('click', (e) => {
+  const box = e.target.closest('.tl-check');
+  if(box){
+    const row = box.closest('.tl-row');
+    setRowChecked(row, row.classList.contains('off'));  // flip
+    updateTracklistCount();
+    return;
+  }
+  if(e.target.closest('.tl-all')){
+    URL_TRACKLIST.querySelectorAll('.tl-row').forEach(r => setRowChecked(r, true));
+    updateTracklistCount();
+  } else if(e.target.closest('.tl-none')){
+    URL_TRACKLIST.querySelectorAll('.tl-row').forEach(r => setRowChecked(r, false));
+    updateTracklistCount();
+  }
+});
+
 function detectURL(u){
   u = u.trim();
   if(!u) return {kind:'empty'};
@@ -1166,6 +1268,15 @@ function detectURL(u){
     if(h.includes('soundcloud')){
       if(url.pathname.split('/').filter(Boolean).length >= 3) return {kind:'sc-tr', label:'SoundCloud track: Yung Lain — Sextrance Worldwide'};
       return {kind:'sc-pl', label:'SoundCloud playlist: "afters" — 22 tracks'};
+    }
+    if(h === 'music.apple.com' || h.endsWith('.music.apple.com')){
+      // The real title/count comes from the backend preview; these are just
+      // placeholder labels + a non-'bad' kind so the Download button is enabled.
+      // Unknown Apple paths default to am-pl so the backend supplies the
+      // specific error (personal-library link, unsupported page, etc.).
+      if(url.pathname.includes('/song/') || url.searchParams.get('i')) return {kind:'am-tr', label:'Apple Music song'};
+      if(url.pathname.includes('/album/')) return {kind:'am-al', label:'Apple Music album'};
+      return {kind:'am-pl', label:'Apple Music playlist'};
     }
     return {kind:'bad'};
   } catch(e){
@@ -1202,19 +1313,21 @@ function setStatus(){
       URL_STATUS.textContent = 'Spotify: ' + trimmed;
     }
     _previewCurrent = trimmed;
+    clearTracklist();
     if(_previewTimer){ clearTimeout(_previewTimer); _previewTimer = null; }
     if(_previewAbort){ _previewAbort.abort(); _previewAbort = null; }
     return;
   }
   const r = detectURL(u);
   URL_STATUS.classList.remove('ok','err');
-  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; return; }
-  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; _previewCurrent=''; return; }
+  if(r.kind === 'empty'){ URL_STATUS.innerHTML = '<span class="muted">&nbsp;</span>'; _previewCurrent=''; clearTracklist(); return; }
+  if(r.kind === 'bad'){ URL_STATUS.classList.add('err'); URL_STATUS.textContent = 'unsupported URL'; _previewCurrent=''; clearTracklist(); return; }
   if(!SPOTIFY_CONFIGURED && r.kind.startsWith('sp')){
     URL_STATUS.classList.add('err');
     URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
     $('#status-settings').onclick = ()=> showSettings();
     _previewCurrent='';
+    clearTracklist();
     return;
   }
   // Don't show any local placeholder; wait for the real title from backend.
@@ -1224,6 +1337,7 @@ function setStatus(){
   if(_previewTimer) clearTimeout(_previewTimer);
   if(_previewAbort) _previewAbort.abort();
   if(u === _previewCurrent) return;
+  clearTracklist();  // URL changed — drop stale names until the new list arrives
   _previewTimer = setTimeout(()=>{
     _previewAbort = new AbortController();
     const expected = u;
@@ -1237,12 +1351,15 @@ function setStatus(){
           URL_STATUS.classList.add('err');
           URL_STATUS.innerHTML = 'Spotify not configured — open <a class="tlink" id="status-settings">[Settings]</a>';
           $('#status-settings').onclick = ()=> showSettings();
+          clearTracklist();
         } else if(j.kind === 'unsupported' || j.kind === 'error'){
           URL_STATUS.classList.add('err');
           URL_STATUS.textContent = j.label;
+          clearTracklist();
         } else {
           URL_STATUS.classList.add('ok');
           URL_STATUS.textContent = j.label;
+          renderTracklist(j, expected);   // playlist / album → show names; single track clears
         }
         _previewCurrent = expected;
       })
@@ -1250,6 +1367,7 @@ function setStatus(){
         if(err.name === 'AbortError') return;
         URL_STATUS.classList.remove('ok'); URL_STATUS.classList.add('err');
         URL_STATUS.textContent = 'preview failed: ' + err.message;
+        clearTracklist();
       });
   }, 450);
 }
@@ -3026,6 +3144,7 @@ $('#dl-btn').addEventListener('click', async ()=>{
       skip_existing: skipExisting,
       skip_analyze: skipAnalyze,
       key_format: keyFormat,
+      exclude_ids: excludedTrackIds(u),   // tracks the user unticked in the preview
     });
     $('#url').value = ''; setStatus();
     jobsCollapsed = false;
@@ -3076,6 +3195,7 @@ $('#w-continue').addEventListener('click', async ()=>{
 
   function srcFromUrl(u){
     if(!u) return 'Unknown';
+    if(u.includes('music.apple')) return 'Apple Music';
     if(u.includes('spotify')) return 'Spotify';
     if(u.includes('youtu')) return 'YouTube';
     if(u.includes('soundcloud')) return 'SoundCloud';
@@ -3262,10 +3382,15 @@ $('#w-continue').addEventListener('click', async ()=>{
       const artist = escapeHtml(f.artist || '');
       const title = escapeHtml(f.title || '');
       const url = escapeHtml(f.spotify_url || '');
+      const openLabel = url.includes('music.apple') ? 'open Apple Music'
+        : url.includes('spotify') ? 'open Spotify'
+        : url.includes('youtu') ? 'open YouTube'
+        : url.includes('soundcloud') ? 'open SoundCloud'
+        : 'open link';
       return `<div class="failure-row" style="font-family:var(--mono); display:flex; justify-content:space-between; gap:12px; padding:1px 0;">`
         + `<span>× ${artist} — ${title}</span>`
         + `<span class="fail-actions">`
-        +   `<a class="tlink" data-fail-act="open" data-fail-idx="${i}" data-url="${url}">[open Spotify]</a>`
+        +   `<a class="tlink" data-fail-act="open" data-fail-idx="${i}" data-url="${url}">[${openLabel}]</a>`
         +   `<a class="tlink" data-fail-act="retry" data-fail-idx="${i}" data-url="${url}">[ retry ]</a>`
         +   `<a class="tlink" data-fail-act="dismiss" data-fail-idx="${i}" data-url="${url}">[ &#215; ]</a>`
         + `</span>`

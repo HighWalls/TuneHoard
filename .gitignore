@@ -2,6 +2,8 @@
 .env
 .spotify_cache
 .cache
+.applemusic_token
+.applemusic_token.tmp
 
 # Server-side user state — paths, optional Spotify creds
 .tunehoard_settings.json

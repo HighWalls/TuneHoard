@@ -6,11 +6,12 @@ Primer for any agent working on **TuneHoard**. Read this first — it's short on
 
 ## What this is
 
-TuneHoard is a Python CLI that takes a **Spotify, YouTube, or SoundCloud URL** — playlist *or* single track / video — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
+TuneHoard is a Python CLI that takes a **Spotify, Apple Music, YouTube, or SoundCloud URL** — playlist *or* single track / video (Apple Music also accepts album URLs) — gets the track list, downloads each track as 320k MP3, analyzes BPM + musical key locally, and writes ID3 tags that Rekordbox reads. Output is organized per-playlist (or under `singles/` for individual tracks) with a sorted `index.csv` for DJ prep.
 
 Repo: https://github.com/HighWalls/TuneHoard
 
 - **Spotify** playlists / tracks: search on YouTube / SoundCloud and download the first match. Artist and title come from Spotify (reliable).
+- **Apple Music** playlists / albums / tracks: exactly like Spotify (metadata → YouTube/SoundCloud search), but needs **no credentials** — it reads the anonymous web-player token from music.apple.com. Personal-library links (`/library/...`) can't be read; the user must Share → Copy Link to get a public `music.apple.com` URL.
 - **YouTube / SoundCloud** playlists / videos: each entry's URL is downloaded directly (no search). Artist/title is best-effort parsed from the video title — `"Artist - Title"` split, falling back to the uploader as artist. Less reliable metadata than Spotify.
 - **Single tracks** (any source): land in `<out>/singles/` so they accumulate together. The same `--skip-existing` dedup applies, so adding more singles incrementally won't re-download.
 
@@ -35,7 +36,7 @@ python main.py <url>
     [--ffmpeg-location PATH]         # optional explicit ffmpeg path (else PATH lookup)
 ```
 
-`<url>` can be a playlist or single-track URL on Spotify, YouTube, or SoundCloud.
+`<url>` can be a playlist or single-track URL on Spotify, Apple Music, YouTube, or SoundCloud (Apple Music also accepts album URLs).
 
 ### Dashboard
 
@@ -84,7 +85,7 @@ python app_native.py    # same dashboard, hosted in a 1280×800 pywebview window
 
 ### Setup (either path)
 
-`ffmpeg` must be on PATH (system install, not pip) and `pip install -r requirements.txt`. Spotify URLs additionally need `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` (CLI) or in the dashboard Settings page, plus a one-time browser OAuth authorization on first run (cached to `.spotify_cache`); YouTube / SoundCloud URLs need neither. The redirect URI registered in the Spotify dashboard must match the one in `spotify_client.py` (default `http://127.0.0.1:8888/callback`).
+`ffmpeg` must be on PATH (system install, not pip) and `pip install -r requirements.txt`. Spotify URLs additionally need `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` (CLI) or in the dashboard Settings page, plus a one-time browser OAuth authorization on first run (cached to `.spotify_cache`); YouTube / SoundCloud / **Apple Music** URLs need neither. The redirect URI registered in the Spotify dashboard must match the one in `spotify_client.py` (default `http://127.0.0.1:8888/callback`).
 
 ## File map
 
@@ -94,6 +95,7 @@ python app_native.py    # same dashboard, hosted in a 1280×800 pywebview window
 | `server.py` | FastAPI dashboard server. Wraps every CLI helper as JSON endpoints; spawns `main.py` as a subprocess for download jobs. Pushes job state over `/ws/jobs` WebSocket. Settings persisted to `.tunehoard_settings.json`. |
 | `dashboard/tunehoard/tunehoard.html` | Single-file vanilla-JS dashboard. Booted by `server.py`. On load it replaces its built-in mock data with `/api/library` + `/api/jobs` (HTTP) + `/ws/jobs` (WebSocket push). |
 | `spotify_client.py` | Spotify playlist / track / Liked Songs → `list[Track]` via spotipy (OAuth user flow). Defines the `Track` dataclass; `get_playlist_tracks()` / `get_track()` / `get_liked_songs()`. |
+| `applemusic_client.py` | Apple Music playlist / album / song → `list[Track]` via the anonymous web-player token (no creds). Imports `Track` from `spotify_client`; `get_playlist_tracks()` / `get_album_tracks()` / `get_track()`; token cached to `.applemusic_token`. |
 | `app_native.py` | Optional pywebview entry point — runs `server.py` on a daemon thread and shows the dashboard in a native OS window instead of a browser tab. |
 | `tunehoard.spec` | PyInstaller onefile spec for `dist/TuneHoard.exe`. Bundles `dashboard/`, the librosa+numba+llvmlite+uvicorn hidden-import tree, and `copy_metadata` for pydantic/fastapi/uvicorn. |
 | `.github/workflows/build.yml` | GitHub Actions: builds Win+macOS binaries on tag pushes (`v*.*.*`), attaches them to the auto-generated GitHub Release. |
@@ -127,7 +129,8 @@ Tracks that fail on every source are written to `failures.txt` alongside `index.
 - **WebSocket pushes are best-effort, polling is the truth-of-record.** `/ws/jobs` broadcasts on JOBS state changes (throttled to ~2 Hz on chatty stdout, unthrottled on terminal states). The dashboard treats WS messages as a fast hint — the 10-second `refreshJobs()` poll runs unconditionally so a dropped/missed message can never desync the UI for long. Reconnect uses exponential backoff (1s → 30s).
 - **Port is 8765 by default but auto-falls-back.** `find_free_port()` probes 8765, 8766, ..., 8770. Override the start with `TUNEHOARD_PORT=N`. If all 5 are taken, the server exits 1 with a clear message rather than crashing on `OSError`.
 - **Host header validation on mutating requests.** Mitigates DNS rebinding: `POST/PUT/PATCH/DELETE` requests with a `Host:` header outside `{127.0.0.1, localhost}:{chosen-port, 8765}` get HTTP 403. `GET/HEAD/OPTIONS` pass through unconditionally. WS `/ws/jobs` does the same check at handler entry (closes with code 1008 on mismatch). Not full CSRF — just enough for the localhost threat model.
-- **`spotify_id` column is a misnomer.** It's a generic primary key. Spotify tracks are raw Spotify IDs; YouTube entries are `"yt:<video_id>"`; SoundCloud are `"sc:<track_id>"`. Namespaced to prevent collisions across sources. Do not "clean up" by splitting into separate columns — it would break the existing `--skip-existing` dedup path.
+- **`spotify_id` column is a misnomer.** It's a generic primary key. Spotify tracks are raw Spotify IDs; YouTube entries are `"yt:<video_id>"`; SoundCloud are `"sc:<track_id>"`; Apple Music are `"am:<catalog_id>"`. Namespaced to prevent collisions across sources. Do not "clean up" by splitting into separate columns — it would break the existing `--skip-existing` dedup path.
+- **Apple Music needs no credentials.** `applemusic_client.py` extracts the anonymous web-player JWT that music.apple.com ships in its JS bundle, caches it to `.applemusic_token` (~35-day validity; refreshed automatically when the API returns 401), and calls `amp-api.music.apple.com`. Apple tracks carry `source_url=None` so they take the same YouTube/SoundCloud **search** path as Spotify — the CSV `source` column records the *audio* source (`youtube`/`soundcloud`), never `"apple"`. Adam IDs are storefront-independent, so the same song pasted from a `/us/` or `/it/` URL dedupes identically. Personal-library links (`/library/...`) raise a friendly "Share → Copy Link" error; artist/curator/station pages are unsupported.
 - **Local analysis only.** We do not call Spotify Audio Features or any paid BPM/key API. See `docs/GOTCHAS.md` for why.
 - **Windows-first.** The dev env is Windows 11. Paths use `pathlib`; filename sanitization strips `<>:"/\|?*` and control chars. stdout/stderr are reconfigured to UTF-8 at startup because the default cp1252 codepage can't print most track titles or the `→` progress arrows.
 - **`--skip-existing` recovers from disk, not just CSV.** If `index.csv` is missing/corrupt but MP3s exist, the flag reconstructs rows from ID3 tags (BPM, Camelot) so you don't re-download 184 tracks. The `key` (full name) and `source` columns are lost in the reconstruction — that's OK, Rekordbox only reads BPM + Camelot.

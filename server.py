@@ -109,6 +109,14 @@ from main import (  # type: ignore[no-redef]
     safe_filename,
     safe_replace,
 )
+from applemusic_client import (
+    AppleMusicError,
+    classify_url as am_classify_url,
+    get_album_tracks as am_get_album_tracks,
+    get_playlist_tracks as am_get_playlist_tracks,
+    get_track as am_get_track,
+    is_applemusic_url,
+)
 from spotify_client import _spotify_client, get_liked_songs, get_playlist_tracks, get_track
 from tagger import tag_file
 from ytdlp_loader import get_ytdlp_tracks, is_soundcloud_url, is_youtube_url
@@ -432,6 +440,7 @@ def _spawn_job(
     skip_analyze: bool,
     key_format: str,
     limit: int,
+    exclude_ids: list[str] | None = None,
 ) -> str:
     job_id = f"j{int(time.time() * 1000)}"
     s = load_settings()
@@ -445,10 +454,10 @@ def _spawn_job(
     # forever on spotipy's interactive browser OAuth (the subprocess has no
     # terminal/stdin), which the dashboard shows as a job stuck "downloading"
     # that never finishes or cancels cleanly. Fail fast with a clear message.
-    # YouTube / SoundCloud need no auth, so they're exempt.
+    # YouTube / SoundCloud / Apple Music need no auth, so they're exempt.
     needs_spotify = (
         url.strip().lower() == "spotify:liked"
-        or not (is_youtube_url(url) or is_soundcloud_url(url))
+        or not (is_youtube_url(url) or is_soundcloud_url(url) or is_applemusic_url(url))
     )
     if needs_spotify and not (PROJECT_ROOT / ".spotify_cache").exists():
         raise HTTPException(
@@ -488,6 +497,14 @@ def _spawn_job(
         args.append("--skip-analyze")
     if limit:
         args.extend(["--limit", str(limit)])
+    # Deselected tracks from the preview. Sanitize to the id charset (they're our
+    # own namespaced ids: word chars, ':', '.', '-') and cap the count so a
+    # malicious localhost caller can't blow past the OS command-line limit.
+    if exclude_ids:
+        safe = [x for x in exclude_ids if x and re.fullmatch(r"[\w:.\-]{1,64}", x)]
+        safe = safe[:_PREVIEW_TRACK_CAP]
+        if safe:
+            args.extend(["--exclude-ids", ",".join(safe)])
 
     env = os.environ.copy()
     if s["spotify_client_id"]:
@@ -746,12 +763,30 @@ def api_patch_settings(patch: SettingsPatch) -> dict[str, Any]:
 
 
 # ── URL preview (lightweight, no download) ────────────────────────────
+# Cap how many track names the preview returns. The list is already fetched to
+# count it, so this only bounds the JSON payload for very large playlists — the
+# dashboard shows a "+N more" line when track_count exceeds what's returned.
+_PREVIEW_TRACK_CAP = 500
+
+
+def _preview_tracklist(tracks: list) -> list[dict[str, str]]:
+    # `id` is the namespaced spotify_id (am:/yt:/sc:/raw Spotify) — the same key
+    # main.py dedups on — so the dashboard can pass back a list of deselected
+    # ids and the download filters them out.
+    return [
+        {"id": t.spotify_id, "artist": t.primary_artist, "title": t.title}
+        for t in tracks[:_PREVIEW_TRACK_CAP]
+    ]
+
+
 @app.get("/api/preview")
 def api_preview(url: str) -> dict[str, Any]:
     """Hit the right loader to get a real title/track-count for the input URL.
 
     YouTube / SoundCloud go through yt-dlp's extract_info (extract_flat). Spotify
-    goes through spotipy if creds are configured. No downloading happens.
+    goes through spotipy if creds are configured. Apple Music uses the anonymous
+    web token (no creds). No downloading happens. Playlist / album previews also
+    return the (capped) track list so the dashboard can show track names.
     """
     url = (url or "").strip()
     if not url:
@@ -785,6 +820,28 @@ def api_preview(url: str) -> dict[str, Any]:
             name, tracks = get_ytdlp_tracks(url, "sc")
             src_label, src_short = "SoundCloud", "sc"
             single_word = "track"
+        elif is_applemusic_url(url):
+            try:
+                kind = am_classify_url(url)
+                if kind == "song":
+                    name, tracks = am_get_track(url)
+                elif kind == "album":
+                    name, tracks = am_get_album_tracks(url)
+                    return {
+                        "kind": "am-al",
+                        "label": f'Apple Music album: "{name}" — {len(tracks)} tracks',
+                        "name": name,
+                        "track_count": len(tracks),
+                        "tracks": _preview_tracklist(tracks),
+                    }
+                else:
+                    name, tracks = am_get_playlist_tracks(url)
+            except AppleMusicError as e:
+                # The outer handler only surfaces the exception type name; catch
+                # here so the user sees the real, actionable message.
+                return {"kind": "unsupported", "label": str(e)}
+            src_label, src_short = "Apple Music", "am"
+            single_word = "song"
         elif "open.spotify.com" in url or url.startswith("spotify:"):
             cid, cs = s["spotify_client_id"], s["spotify_client_secret"]
             if not cid or not cs:
@@ -821,6 +878,7 @@ def api_preview(url: str) -> dict[str, Any]:
         "label": f'{src_label} playlist: "{name}" — {len(tracks)} tracks',
         "name": name,
         "track_count": len(tracks),
+        "tracks": _preview_tracklist(tracks),
     }
 
 
@@ -1725,6 +1783,9 @@ class JobReq(BaseModel):
     skip_analyze: bool | None = None
     key_format: str | None = None
     limit: int = 0
+    # Track ids (namespaced spotify_id) the user unticked in the preview list —
+    # these are dropped before downloading. Empty = download the whole playlist.
+    exclude_ids: list[str] | None = None
 
 
 @app.post("/api/jobs")
@@ -1744,6 +1805,7 @@ def api_start_job(req: JobReq) -> dict[str, Any]:
         skip_analyze=skip_a,
         key_format=req.key_format or s["key_format"],
         limit=req.limit,
+        exclude_ids=req.exclude_ids or [],
     )
     # Broadcast immediately so connected WS clients see the new job appear
     # without waiting for the runner thread's first stdout line.
