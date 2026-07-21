@@ -3,13 +3,22 @@
 Uses OAuth user flow because Spotify tightened Client Credentials access to
 `playlist_items` in 2025 — even public playlists now return 401 without a user
 token. First run opens a browser; subsequent runs read a cached token.
+
+Third-party playlists (owned by another account) get 403 on `playlist_items`
+for Development Mode apps since Spotify's 2024/2025 API restrictions. For
+those, `get_playlist_tracks` transparently falls back to the public embed page
+(open.spotify.com/embed/playlist/<id>), which serves the track list
+anonymously — same spirit as applemusic_client's anonymous web-token approach.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import requests
 import spotipy
+from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
 # Anchor the OAuth token cache to this module's folder (the project root), NOT
@@ -147,6 +156,107 @@ def get_liked_songs(
     return "Liked Songs", tracks
 
 
+_EMBED_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+# The embed page's trackList is believed to cap around 100 entries; when we see
+# exactly this many we warn that the playlist may actually be longer.
+_EMBED_SUSPECT_CAP = 100
+
+
+def _embed_playlist_tracks(playlist_id: str) -> tuple[str, list[Track]]:
+    """Anonymous fallback: read the track list from the public embed page.
+
+    Development Mode apps get 403 on `playlist_items` for playlists the
+    authorized user doesn't own. The public embed page still ships the track
+    list in its __NEXT_DATA__ JSON — title, artists (one combined string),
+    duration, and the track uri. No album / ISRC, which is fine: the download
+    search query only needs artist + title.
+    """
+    try:
+        resp = requests.get(
+            f"https://open.spotify.com/embed/playlist/{playlist_id}",
+            headers={"User-Agent": _EMBED_UA},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"network error reaching Spotify embed page: {e}") from e
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Spotify won't share this playlist (embed page HTTP {resp.status_code}) — "
+            "it may be private or removed."
+        )
+
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        resp.text,
+        re.S,
+    )
+    if not m:
+        raise RuntimeError(
+            "could not read Spotify's embed page — Spotify may have changed "
+            "their site; try updating TuneHoard."
+        )
+
+    def _find_key(obj, key, depth=0):
+        # The entity sits a few levels deep under props/pageProps; walk instead
+        # of hardcoding the path so minor page reshuffles don't break us.
+        if depth > 8:
+            return None
+        if isinstance(obj, dict):
+            if key in obj:
+                return obj[key]
+            for v in obj.values():
+                found = _find_key(v, key, depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for v in obj:
+                found = _find_key(v, key, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    entity = _find_key(json.loads(m.group(1)), "entity") or {}
+    name = entity.get("name") or entity.get("title") or "playlist"
+    rows = entity.get("trackList") or []
+    if not rows:
+        raise RuntimeError(
+            "Spotify won't share this playlist's tracks (private or restricted) — "
+            "the embed page lists none."
+        )
+
+    tracks: list[Track] = []
+    for row in rows:
+        uri = row.get("uri") or ""
+        if not uri.startswith("spotify:track:"):
+            continue  # skip episodes / local files
+        artists = [a.strip() for a in (row.get("subtitle") or "").split(",") if a.strip()]
+        tracks.append(
+            Track(
+                spotify_id=uri.rsplit(":", 1)[1],
+                title=row.get("title", ""),
+                artists=artists,
+                album="",
+                duration_ms=int(row.get("duration") or 0),
+                isrc=None,
+            )
+        )
+
+    print(
+        f"  → Spotify blocks API access to this third-party playlist; "
+        f"read {len(tracks)} tracks from the public embed page instead."
+    )
+    if len(rows) == _EMBED_SUSPECT_CAP:
+        print(
+            f"  ! embed page returned exactly {_EMBED_SUSPECT_CAP} tracks — the "
+            "playlist may be longer (the embed caps its list). Longer tail "
+            "tracks can't be fetched without owning the playlist."
+        )
+    return name, tracks
+
+
 def get_playlist_tracks(
     playlist_url: str,
     client_id: str,
@@ -165,13 +275,28 @@ def get_playlist_tracks(
     sp = spotipy.Spotify(auth_manager=auth)
 
     pid = _extract_playlist_id(playlist_url)
-    meta = sp.playlist(pid, fields="name")
-    playlist_name = meta["name"]
+    try:
+        meta = sp.playlist(pid, fields="name")
+        playlist_name = meta["name"]
+    except SpotifyException as e:
+        # Editorial / algorithmic playlists 403 or 404 even on metadata for
+        # Development Mode apps. Try the anonymous embed page before giving up.
+        if e.http_status in (403, 404):
+            return _embed_playlist_tracks(pid)
+        raise
 
     tracks: list[Track] = []
     # Spotify renamed the per-entry key from `track` to `item` in 2025 (unifying
     # tracks + episodes). Check both keys for resilience.
-    results = sp.playlist_items(pid, additional_types=["track"])
+    try:
+        results = sp.playlist_items(pid, additional_types=["track"])
+    except SpotifyException as e:
+        # Third-party playlists (owned by another account): Development Mode
+        # apps get 403 on the items endpoint even though metadata worked.
+        # Fall back to the public embed page — anonymous, no ownership check.
+        if e.http_status == 403:
+            return _embed_playlist_tracks(pid)
+        raise
     while results:
         for entry in results["items"]:
             t = entry.get("item") or entry.get("track")
